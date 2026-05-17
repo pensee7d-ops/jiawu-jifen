@@ -1,0 +1,7 @@
+jifen.seventlink.top {
+    encode gzip
+    request_body {
+        max_size 12MB
+    }
+    reverse_proxy 127.0.0.1:8080
+}
