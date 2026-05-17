@@ -10,6 +10,17 @@ def _jpg_bytes():
     return buf.getvalue()
 
 
+def _make_fixed_checkin(client):
+    client.post(
+        "/checkin",
+        data={"kind": "fixed", "task_id": "3", "note": "", "mood": ""},
+        files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")},
+    )
+    return client.app.state.conn.execute(
+        "SELECT id FROM checkins ORDER BY id DESC LIMIT 1"
+    ).fetchone()["id"]
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CHORES_DB_PATH", str(tmp_path / "t.db"))
@@ -139,3 +150,29 @@ def test_dashboard_shows_week_and_today_totals(client):
     assert "本周累计" in r.text
     assert "今日电脑使用" in r.text
     assert "10" in r.text  # 全屋吸尘 10 分
+
+
+def test_comment_records_author_name_and_role(client):
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    cid = _make_fixed_checkin(client)
+    r = client.post(f"/checkin/{cid}/comment", data={"body": "干得漂亮！"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM comments ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["author_name"] == "姐姐"
+    assert row["author_role"] == "supervisor"
+    assert row["body"] == "干得漂亮！"
+
+
+def test_react_records_stamp(client):
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    cid = _make_fixed_checkin(client)
+    r = client.post(f"/checkin/{cid}/react", data={"kind": "🏅"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM reactions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["kind"] == "🏅" and row["author_name"] == "姐姐"

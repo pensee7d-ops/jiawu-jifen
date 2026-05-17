@@ -211,6 +211,38 @@ def create_app() -> FastAPI:
         }
         return templates.TemplateResponse("dashboard.html", ctx)
 
+    def _author(request: Request):
+        role = auth.current_role(request)
+        name = auth.current_name(request) or ("弟弟" if role == auth.ROLE_CHECKIN else "监管者")
+        return role, name
+
+    @app.post("/checkin/{cid}/comment")
+    def add_comment(request: Request, cid: int, body: str = Form(...)):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        role, name = _author(request)
+        if body.strip():
+            conn.execute(
+                "INSERT INTO comments (checkin_id, author_name, author_role, body,"
+                " created_at) VALUES (?,?,?,?,?)",
+                (cid, name, role, body.strip(), _now().isoformat(timespec="seconds")),
+            )
+            conn.commit()
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/checkin/{cid}/react")
+    def add_react(request: Request, cid: int, kind: str = Form(...)):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        role, name = _author(request)
+        conn.execute(
+            "INSERT INTO reactions (checkin_id, author_name, kind, created_at)"
+            " VALUES (?,?,?,?)",
+            (cid, name, kind, _now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        return RedirectResponse("/", status_code=303)
+
     return app
 
 
