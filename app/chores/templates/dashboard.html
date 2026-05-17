@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>积分看板</h1>
+<div class="card kpi">
+  <div class="box"><div class="num">{{ week_total }}</div><div class="muted">本周累计</div></div>
+  <div class="box"><div class="num">{{ today_total }}</div><div class="muted">今日分</div></div>
+  <div class="box"><div class="num">{{ streak }}</div><div class="muted">连续打卡天</div></div>
+</div>
+<div class="card">
+  本周单词全打卡：{% if vocab_ok %}<b style="color:#36c172">✓</b>{% else %}<b style="color:#c0392b">✗</b>{% endif %}
+  <div class="muted">本周进度 {{ week_total }}/{{ goal }}</div>
+  <div class="bar"><i style="width:{{ progress }}%"></i></div>
+</div>
+<div class="card">今日电脑使用：<b>{{ comp_min // 60 }} 小时 {{ comp_min % 60 }} 分</b>（共 {{ comp_seg }} 段）
+  <form method="post" action="/computer/on" style="display:inline"><button>🖥️ 开机</button></form>
+  <form method="post" action="/computer/off" style="display:inline"><button>关机</button></form>
+</div>
+{% if announcement %}<div class="card"><b>📌 本周目标 / 规则公告</b><p>{{ announcement }}</p></div>{% endif %}
+<p><a href="/checkin"><button>＋ 去打卡</button></a>
+   {% if role == 'supervisor' %}<a href="/review"><button>待审</button></a>
+   <a href="/admin/catalog"><button>任务管理</button></a>
+   <a href="/admin/announcement"><button>改公告</button></a>{% endif %}
+   <a href="/logout" class="muted">退出</a></p>
+<h2>动态</h2>
+{% for f in feed %}
+<div class="card">
+  <div class="muted">{{ f["created_at"][:16].replace("T"," ") }} ·
+    {% if f["kind"]=="fixed" %}{{ f["task_name"] }}
+    {% elif f["kind"]=="adjustment" %}调整
+    {% else %}{{ f["title"] }}{% endif %}
+    · {% if f["status"]=="scored" %}<b>{{ f["awarded_points"] }} 分</b>
+      {% elif f["status"]=="pending" %}<span style="color:#e67e22">待定（建议 {{ f["proposed_points"] }}）</span>
+      {% else %}<span style="color:#c0392b">已驳回</span>{% endif %}</div>
+  {% if f["mood"] %}<p>{{ f["mood"] }}</p>{% endif %}
+  {% if f["note"] %}<p>{{ f["note"] }}</p>{% endif %}
+  {% if f["photo_path"] %}<img class="photo" src="{{ f['photo_path'] }}">{% endif %}
+  <div>{% for rc in f["reactions"] %}<span class="stamp">{{ rc["kind"] }}</span>{% endfor %}</div>
+  {% for cm in f["comments"] %}
+    <p class="muted"><b>{{ cm["author_name"] }}</b>：{{ cm["body"] }}</p>
+  {% endfor %}
+  <form method="post" action="/checkin/{{ f['id'] }}/comment" style="margin-top:6px">
+    <input type="text" name="body" placeholder="说点鼓励的话…">
+    <button>评论</button>
+  </form>
+  <form method="post" action="/checkin/{{ f['id'] }}/react">
+    {% for emo in ['👍','⭐','🏅','🌸'] %}
+      <button name="kind" value="{{ emo }}" class="stamp"
+        style="background:none;color:inherit">{{ emo }}</button>
+    {% endfor %}
+  </form>
+</div>
+{% endfor %}
+{% endblock %}

@@ -164,9 +164,52 @@ def create_app() -> FastAPI:
     def dashboard(request: Request):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
-        return templates.TemplateResponse(
-            "base.html", {"request": request, "body": "dashboard placeholder"}
-        )
+        today = _now().date()
+        rows = conn.execute(
+            "SELECT c.*, t.is_vocab AS is_vocab, t.name AS task_name "
+            "FROM checkins c LEFT JOIN task_catalog t ON c.task_id=t.id"
+        ).fetchall()
+        rows = [dict(r) for r in rows]
+        sessions = [
+            dict(r) for r in conn.execute(
+                "SELECT start_at, end_at FROM computer_sessions"
+            ).fetchall()
+        ]
+        comp_min, comp_seg = scoring.computer_today(sessions, _now())
+        ann = conn.execute(
+            "SELECT body FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        feed = sorted(rows, key=lambda r: r["created_at"], reverse=True)[:30]
+        for f in feed:
+            f["comments"] = [
+                dict(x) for x in conn.execute(
+                    "SELECT author_name, author_role, body, created_at "
+                    "FROM comments WHERE checkin_id=? ORDER BY id", (f["id"],)
+                ).fetchall()
+            ]
+            f["reactions"] = [
+                dict(x) for x in conn.execute(
+                    "SELECT author_name, kind FROM reactions WHERE checkin_id=?",
+                    (f["id"],)
+                ).fetchall()
+            ]
+        wk = scoring.week_total(rows, today)
+        ctx = {
+            "request": request,
+            "role": auth.current_role(request),
+            "name": auth.current_name(request),
+            "week_total": wk,
+            "today_total": scoring.today_total(rows, today),
+            "streak": scoring.streak_days(rows, today),
+            "vocab_ok": scoring.vocab_all_done(rows, today),
+            "progress": int(scoring.progress_ratio(wk, cfg.weekly_goal) * 100),
+            "goal": cfg.weekly_goal,
+            "comp_min": comp_min,
+            "comp_seg": comp_seg,
+            "announcement": ann["body"] if ann else "",
+            "feed": feed,
+        }
+        return templates.TemplateResponse("dashboard.html", ctx)
 
     return app
 

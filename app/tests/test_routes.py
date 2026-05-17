@@ -125,3 +125,17 @@ def test_computer_off_without_open_is_noop(client):
         "SELECT COUNT(*) AS c FROM computer_sessions"
     ).fetchone()["c"]
     assert n == 0
+
+
+def test_dashboard_shows_week_and_today_totals(client):
+    _login_checkin(client)
+    client.post(
+        "/checkin",
+        data={"kind": "fixed", "task_id": "3", "note": "", "mood": ""},
+        files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")},
+    )
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "本周累计" in r.text
+    assert "今日电脑使用" in r.text
+    assert "10" in r.text  # 全屋吸尘 10 分
