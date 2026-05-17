@@ -1,5 +1,13 @@
+import io
 import pytest
+from PIL import Image
 from fastapi.testclient import TestClient
+
+
+def _jpg_bytes():
+    buf = io.BytesIO()
+    Image.new("RGB", (1200, 900), (90, 90, 90)).save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 @pytest.fixture()
@@ -51,3 +59,47 @@ def test_supervisor_picks_name_and_can_open_dashboard(client):
     assert r.status_code == 303 and r.headers["location"] == "/"
     r = client.get("/")
     assert r.status_code == 200
+
+
+def _login_checkin(client):
+    client.post("/login", data={"password": "didi"})
+
+
+def test_checkin_form_lists_tasks(client):
+    _login_checkin(client)
+    r = client.get("/checkin")
+    assert r.status_code == 200
+    assert "全屋拖地" in r.text
+
+
+def test_fixed_checkin_auto_scores(client):
+    _login_checkin(client)
+    r = client.post(
+        "/checkin",
+        data={"kind": "fixed", "task_id": "3", "note": "扫干净了", "mood": "😀"},
+        files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM checkins ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "scored"
+    assert row["awarded_points"] == 10  # 全屋吸尘默认 10
+    assert row["photo_path"].endswith(".jpg")
+
+
+def test_adhoc_checkin_is_pending(client):
+    _login_checkin(client)
+    r = client.post(
+        "/checkin",
+        data={"kind": "adhoc", "title": "帮邻居取快递", "proposed_points": "4",
+              "note": "顺手", "mood": "🙂"},
+        files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM checkins ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["proposed_points"] == 4
+    assert row["awarded_points"] is None

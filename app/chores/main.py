@@ -77,6 +77,59 @@ def create_app() -> FastAPI:
         request.session["name"] = name
         return RedirectResponse("/", status_code=303)
 
+    @app.get("/checkin", response_class=HTMLResponse)
+    def checkin_form(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        tasks = conn.execute(
+            "SELECT id, name, default_points FROM task_catalog "
+            "WHERE active=1 ORDER BY sort_order, id"
+        ).fetchall()
+        return templates.TemplateResponse(
+            "checkin_form.html", {"request": request, "tasks": tasks}
+        )
+
+    @app.post("/checkin")
+    async def checkin_submit(
+        request: Request,
+        kind: str = Form(...),
+        task_id: str = Form(""),
+        title: str = Form(""),
+        proposed_points: str = Form(""),
+        note: str = Form(""),
+        mood: str = Form(""),
+        photo: UploadFile = File(None),
+    ):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        photo_path = None
+        if photo is not None:
+            raw = await photo.read()
+            if raw:
+                photo_path = save_photo(raw, cfg.photo_dir)
+        now = _now().isoformat(timespec="seconds")
+        if kind == "fixed":
+            t = conn.execute(
+                "SELECT default_points FROM task_catalog WHERE id=?", (task_id,)
+            ).fetchone()
+            pts = scoring.award_for_fixed(t)
+            conn.execute(
+                "INSERT INTO checkins (kind, task_id, photo_path, note, mood,"
+                " awarded_points, status, created_at) VALUES "
+                "(?,?,?,?,?,?,'scored',?)",
+                (kind, int(task_id), photo_path, note, mood, pts, now),
+            )
+        else:
+            prop = int(proposed_points) if proposed_points.strip() else None
+            conn.execute(
+                "INSERT INTO checkins (kind, title, photo_path, note, mood,"
+                " proposed_points, status, created_at) VALUES "
+                "(?,?,?,?,?,?,'pending',?)",
+                ("adhoc", title, photo_path, note, mood, prop, now),
+            )
+        conn.commit()
+        return RedirectResponse("/", status_code=303)
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         if auth.current_role(request) is None:
