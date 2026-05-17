@@ -243,6 +243,56 @@ def create_app() -> FastAPI:
         conn.commit()
         return RedirectResponse("/", status_code=303)
 
+    @app.get("/review", response_class=HTMLResponse)
+    def review_list(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        pend = conn.execute(
+            "SELECT * FROM checkins WHERE status='pending' ORDER BY id"
+        ).fetchall()
+        return templates.TemplateResponse(
+            "review.html", {"request": request, "pending": pend}
+        )
+
+    @app.post("/review/{cid}")
+    def review_act(
+        request: Request, cid: int,
+        action: str = Form(...), points: str = Form("0")
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        reviewer = auth.current_name(request) or "监管者"
+        now = _now().isoformat(timespec="seconds")
+        if action == "approve":
+            conn.execute(
+                "UPDATE checkins SET status='scored', awarded_points=?, "
+                "reviewed_by=?, reviewed_at=? WHERE id=?",
+                (int(points or 0), reviewer, now, cid),
+            )
+        else:
+            conn.execute(
+                "UPDATE checkins SET status='rejected', awarded_points=0, "
+                "reviewed_by=?, reviewed_at=? WHERE id=?",
+                (reviewer, now, cid),
+            )
+        conn.commit()
+        return RedirectResponse("/review", status_code=303)
+
+    @app.post("/adjust")
+    def adjust(request: Request, points: str = Form(...), reason: str = Form("")):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        reviewer = auth.current_name(request) or "监管者"
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO checkins (kind, title, note, awarded_points, status,"
+            " created_at, reviewed_by, reviewed_at) VALUES "
+            "('adjustment',?,?,?, 'scored', ?, ?, ?)",
+            ("分值调整", reason, int(points), now, reviewer, now),
+        )
+        conn.commit()
+        return RedirectResponse("/", status_code=303)
+
     return app
 
 

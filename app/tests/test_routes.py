@@ -176,3 +176,62 @@ def test_react_records_stamp(client):
         "SELECT * FROM reactions ORDER BY id DESC LIMIT 1"
     ).fetchone()
     assert row["kind"] == "🏅" and row["author_name"] == "姐姐"
+
+
+def test_review_list_shows_pending(client):
+    _login_checkin(client)
+    client.post("/checkin", data={"kind": "adhoc", "title": "擦窗", "proposed_points": "6"},
+                files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")})
+    client.get("/logout")
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    r = client.get("/review")
+    assert r.status_code == 200 and "擦窗" in r.text
+
+
+def test_approve_sets_scored_with_points_and_reviewer(client):
+    _login_checkin(client)
+    client.post("/checkin", data={"kind": "adhoc", "title": "擦窗", "proposed_points": "6"},
+                files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")})
+    cid = client.app.state.conn.execute(
+        "SELECT id FROM checkins ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    client.get("/logout")
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    r = client.post(f"/review/{cid}", data={"action": "approve", "points": "8"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM checkins WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "scored" and row["awarded_points"] == 8
+    assert row["reviewed_by"] == "姐姐"
+
+
+def test_reject_sets_rejected(client):
+    _login_checkin(client)
+    client.post("/checkin", data={"kind": "adhoc", "title": "x", "proposed_points": "6"},
+                files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")})
+    cid = client.app.state.conn.execute(
+        "SELECT id FROM checkins ORDER BY id DESC LIMIT 1").fetchone()["id"]
+    client.get("/logout"); client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    client.post(f"/review/{cid}", data={"action": "reject", "points": "0"})
+    row = client.app.state.conn.execute(
+        "SELECT status FROM checkins WHERE id=?", (cid,)).fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_supervisor_can_deduct_points(client):
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+    r = client.post("/adjust", data={"points": "-5", "reason": "顶嘴扣分"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM checkins ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["kind"] == "adjustment" and row["awarded_points"] == -5
+    assert row["status"] == "scored"
+
+
+def test_review_requires_supervisor(client):
+    _login_checkin(client)
+    r = client.get("/review")
+    assert r.status_code == 303 and r.headers["location"] == "/login"

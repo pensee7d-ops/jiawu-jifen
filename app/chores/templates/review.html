@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>待审打卡</h1>
+{% for p in pending %}
+<div class="card">
+  <b>{{ p["title"] }}</b> · 建议 {{ p["proposed_points"] }} 分
+  {% if p["note"] %}<p>{{ p["note"] }}</p>{% endif %}
+  {% if p["photo_path"] %}<img class="photo" src="{{ p['photo_path'] }}">{% endif %}
+  <form method="post" action="/review/{{ p['id'] }}">
+    <input type="number" name="points" value="{{ p['proposed_points'] or 0 }}">
+    <button name="action" value="approve">确认计分</button>
+    <button name="action" value="reject" style="background:#c0392b">驳回</button>
+  </form>
+</div>
+{% else %}<p class="muted">没有待审项 🎉</p>{% endfor %}
+<h2>扣分 / 调整</h2>
+<form method="post" action="/adjust" class="card">
+  <input type="number" name="points" placeholder="负数为扣分，如 -5">
+  <input type="text" name="reason" placeholder="原因">
+  <button>记录调整</button>
+</form>
+<p><a href="/">← 回看板</a></p>
+{% endblock %}
