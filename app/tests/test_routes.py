@@ -41,3 +41,13 @@ def test_dashboard_requires_login(client):
     r = client.get("/")
     assert r.status_code == 303
     assert r.headers["location"] == "/login"
+
+
+def test_supervisor_picks_name_and_can_open_dashboard(client):
+    client.post("/login", data={"password": "jia"})
+    r = client.get("/whoami")
+    assert r.status_code == 200 and "姐姐" in r.text
+    r = client.post("/whoami", data={"name": "姐姐"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    r = client.get("/")
+    assert r.status_code == 200

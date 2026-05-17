@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>你是谁？</h1>
+<form method="post" action="/whoami">
+  <select name="name">
+    {% for s in supervisors %}<option>{{ s["name"] }}</option>{% endfor %}
+  </select>
+  <button type="submit">确认</button>
+</form>
+{% endblock %}

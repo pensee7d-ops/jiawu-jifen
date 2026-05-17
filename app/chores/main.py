@@ -59,6 +59,24 @@ def create_app() -> FastAPI:
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
 
+    @app.get("/whoami", response_class=HTMLResponse)
+    def whoami_page(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        sups = conn.execute(
+            "SELECT name FROM supervisors WHERE active=1 ORDER BY id"
+        ).fetchall()
+        return templates.TemplateResponse(
+            "whoami.html", {"request": request, "supervisors": sups}
+        )
+
+    @app.post("/whoami")
+    def whoami_set(request: Request, name: str = Form(...)):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        request.session["name"] = name
+        return RedirectResponse("/", status_code=303)
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         if auth.current_role(request) is None:
