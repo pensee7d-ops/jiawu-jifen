@@ -293,6 +293,67 @@ def create_app() -> FastAPI:
         conn.commit()
         return RedirectResponse("/", status_code=303)
 
+    @app.get("/admin/catalog", response_class=HTMLResponse)
+    def catalog_page(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        tasks = conn.execute(
+            "SELECT * FROM task_catalog ORDER BY sort_order, id"
+        ).fetchall()
+        return templates.TemplateResponse(
+            "catalog_admin.html", {"request": request, "tasks": tasks}
+        )
+
+    @app.post("/admin/catalog")
+    def catalog_edit(
+        request: Request, op: str = Form(...),
+        task_id: str = Form(""), name: str = Form(""),
+        points: str = Form("0"), is_vocab: str = Form("0")
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        if op == "add" and name.strip():
+            conn.execute(
+                "INSERT INTO task_catalog (name, default_points, is_vocab, sort_order)"
+                " VALUES (?,?,?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM task_catalog))",
+                (name.strip(), int(points or 0), int(is_vocab or 0)),
+            )
+        elif op == "deactivate":
+            conn.execute("UPDATE task_catalog SET active=0 WHERE id=?", (task_id,))
+        elif op == "activate":
+            conn.execute("UPDATE task_catalog SET active=1 WHERE id=?", (task_id,))
+        elif op == "update":
+            conn.execute(
+                "UPDATE task_catalog SET name=?, default_points=?, is_vocab=? WHERE id=?",
+                (name.strip(), int(points or 0), int(is_vocab or 0), task_id),
+            )
+        conn.commit()
+        return RedirectResponse("/admin/catalog", status_code=303)
+
+    @app.get("/admin/announcement", response_class=HTMLResponse)
+    def announcement_page(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        cur = conn.execute(
+            "SELECT body FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return templates.TemplateResponse(
+            "announcement.html",
+            {"request": request, "current": cur["body"] if cur else ""},
+        )
+
+    @app.post("/admin/announcement")
+    def announcement_set(request: Request, body: str = Form(...)):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        conn.execute("UPDATE announcements SET active=0 WHERE active=1")
+        conn.execute(
+            "INSERT INTO announcements (body, created_at, active) VALUES (?,?,1)",
+            (body.strip(), _now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        return RedirectResponse("/", status_code=303)
+
     return app
 
 

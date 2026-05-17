@@ -235,3 +235,41 @@ def test_review_requires_supervisor(client):
     _login_checkin(client)
     r = client.get("/review")
     assert r.status_code == 303 and r.headers["location"] == "/login"
+
+
+def _sup(client):
+    client.post("/login", data={"password": "jia"})
+    client.post("/whoami", data={"name": "姐姐"})
+
+
+def test_add_task_to_catalog(client):
+    _sup(client)
+    r = client.post("/admin/catalog", data={
+        "op": "add", "name": "遛狗", "points": "4", "is_vocab": "0"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM task_catalog WHERE name='遛狗'").fetchone()
+    assert row["default_points"] == 4
+
+
+def test_deactivate_task(client):
+    _sup(client)
+    client.post("/admin/catalog", data={"op": "deactivate", "task_id": "1"})
+    row = client.app.state.conn.execute(
+        "SELECT active FROM task_catalog WHERE id=1").fetchone()
+    assert row["active"] == 0
+
+
+def test_set_announcement(client):
+    _sup(client)
+    r = client.post("/admin/announcement", data={"body": "五一：每日 60 分玩 3h"})
+    assert r.status_code == 303
+    row = client.app.state.conn.execute(
+        "SELECT * FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    assert "五一" in row["body"]
+
+
+def test_catalog_requires_supervisor(client):
+    _login_checkin(client)
+    r = client.get("/admin/catalog")
+    assert r.status_code == 303 and r.headers["location"] == "/login"

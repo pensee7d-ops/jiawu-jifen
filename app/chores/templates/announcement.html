@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>本周目标 / 规则公告</h1>
+<form method="post" action="/admin/announcement">
+  <textarea name="body" rows="6"
+    placeholder="如：五一假期 每日达 60 分玩 3h，超额另定">{{ current }}</textarea>
+  <button>发布</button>
+</form>
+<p><a href="/">← 回看板</a></p>
+{% endblock %}
