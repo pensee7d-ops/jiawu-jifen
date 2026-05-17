@@ -1,0 +1,8 @@
+# 默认按文本处理，行尾交给 Git 规范化
+* text=auto
+
+# 这些文件要在 Linux VPS 上执行/解析，强制 LF，禁止 CRLF
+*.sh   text eol=lf
+*.service text eol=lf
+Caddyfile* text eol=lf
+*.py   text eol=lf
