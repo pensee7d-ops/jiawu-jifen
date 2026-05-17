@@ -103,3 +103,25 @@ def test_adhoc_checkin_is_pending(client):
     assert row["status"] == "pending"
     assert row["proposed_points"] == 4
     assert row["awarded_points"] is None
+
+
+def test_computer_on_then_off_creates_closed_session(client):
+    _login_checkin(client)
+    r = client.post("/computer/on")
+    assert r.status_code == 303
+    r = client.post("/computer/off")
+    assert r.status_code == 303
+    rows = client.app.state.conn.execute(
+        "SELECT * FROM computer_sessions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert rows["start_at"] is not None and rows["end_at"] is not None
+
+
+def test_computer_off_without_open_is_noop(client):
+    _login_checkin(client)
+    r = client.post("/computer/off")
+    assert r.status_code == 303
+    n = client.app.state.conn.execute(
+        "SELECT COUNT(*) AS c FROM computer_sessions"
+    ).fetchone()["c"]
+    assert n == 0

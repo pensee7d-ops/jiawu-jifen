@@ -130,6 +130,36 @@ def create_app() -> FastAPI:
         conn.commit()
         return RedirectResponse("/", status_code=303)
 
+    @app.post("/computer/on")
+    def computer_on(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        open_row = conn.execute(
+            "SELECT id FROM computer_sessions WHERE end_at IS NULL"
+        ).fetchone()
+        if open_row is None:
+            conn.execute(
+                "INSERT INTO computer_sessions (start_at) VALUES (?)",
+                (_now().isoformat(timespec="seconds"),),
+            )
+            conn.commit()
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/computer/off")
+    def computer_off(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        open_row = conn.execute(
+            "SELECT id FROM computer_sessions WHERE end_at IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if open_row is not None:
+            conn.execute(
+                "UPDATE computer_sessions SET end_at=? WHERE id=?",
+                (_now().isoformat(timespec="seconds"), open_row["id"]),
+            )
+            conn.commit()
+        return RedirectResponse("/", status_code=303)
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
         if auth.current_role(request) is None:
