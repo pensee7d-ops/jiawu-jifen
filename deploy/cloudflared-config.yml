@@ -1,0 +1,10 @@
+# /etc/cloudflared/config.yml — Cloudflare Tunnel ingress for the chores site.
+# 443 在本 VPS 上被 Xray 独占且不可动，故不用 Caddy/Nginx 抢端口；
+# 改用 Cloudflare Tunnel：cloudflared 主动外连 Cloudflare，不开任何入站端口，
+# 对 Xray 零影响。tunnel id / credentials-file 用 `cloudflared tunnel create` 生成的实际值替换。
+tunnel: <TUNNEL_UUID>
+credentials-file: /root/.cloudflared/<TUNNEL_UUID>.json
+ingress:
+  - hostname: jifen.seventylink.top
+    service: http://127.0.0.1:8080
+  - service: http_status:404

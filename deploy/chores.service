@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=chores
-WorkingDirectory=/opt/chores/app
-EnvironmentFile=/opt/chores/app/.env
-ExecStart=/opt/chores/app/.venv/bin/uvicorn chores.main:app --host 127.0.0.1 --port 8080
+WorkingDirectory=/opt/chores/jiawu-jifen/app
+EnvironmentFile=/opt/chores/jiawu-jifen/app/.env
+ExecStart=/opt/chores/jiawu-jifen/app/.venv/bin/uvicorn chores.main:app --host 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=3
 MemoryMax=180M
