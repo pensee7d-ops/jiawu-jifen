@@ -8,8 +8,6 @@
     <input type="hidden" name="task_id" value="{{ t['id'] }}">
     <input type="text" name="name" value="{{ t['name'] }}">
     <input type="number" name="points" value="{{ t['default_points'] }}">
-    <label><input type="checkbox" name="is_vocab" value="1"
-      {% if t['is_vocab'] %}checked{% endif %}> 计入"单词全勤"</label>
     <button>保存</button>
   </form>
   <form method="post" action="/admin/catalog">
@@ -26,7 +24,6 @@
     <input type="hidden" name="op" value="add">
     <input type="text" name="name" placeholder="任务名">
     <input type="number" name="points" placeholder="默认分">
-    <label><input type="checkbox" name="is_vocab" value="1"> 单词类</label>
     <button>添加</button>
   </form>
 </div>

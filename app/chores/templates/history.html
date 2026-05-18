@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>历史周期</h1>
+{% for it in items %}
+<div class="card">
+  <a href="/history/{{ it['id'] }}"><b>第 {{ it['seq'] }} 期</b></a>
+  <div class="muted">{{ it['started'] }} ~ {{ it['ended'] }}</div>
+  <div>累计 <b>{{ it['total'] }}</b> 分 · {{ it['n'] }} 条打卡</div>
+</div>
+{% else %}<p class="muted">还没有已归档的周期。</p>{% endfor %}
+<p><a href="/">← 回看板</a></p>
+{% endblock %}

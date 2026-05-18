@@ -9,28 +9,20 @@ def _date_of(s: str) -> dt.date:
     return _parse_dt(s).date()
 
 
-def week_start(d: dt.date) -> dt.date:
-    """周一为一周起点。"""
-    return d - dt.timedelta(days=d.weekday())
-
-
 def award_for_fixed(task_row) -> int:
     return int(task_row["default_points"])
 
 
-def _scored_in_week(checkins, today: dt.date):
-    start = week_start(today)
-    end = start + dt.timedelta(days=7)
-    for c in checkins:
-        if c["status"] != "scored":
-            continue
-        d = _date_of(c["created_at"])
-        if start <= d < end:
-            yield c
+def period_total(checkins) -> int:
+    """当前周期累计：传入的已是本周期 checkins，求已计分项之和。
 
-
-def week_total(checkins, today: dt.date) -> int:
-    return sum(int(c["awarded_points"] or 0) for c in _scored_in_week(checkins, today))
+    含监管者的 adjustment（扣分/加分）——它们计入总分，只是不在动态流展示。
+    """
+    return sum(
+        int(c["awarded_points"] or 0)
+        for c in checkins
+        if c["status"] == "scored"
+    )
 
 
 def today_total(checkins, today: dt.date) -> int:
@@ -39,31 +31,6 @@ def today_total(checkins, today: dt.date) -> int:
         for c in checkins
         if c["status"] == "scored" and _date_of(c["created_at"]) == today
     )
-
-
-def streak_days(checkins, today: dt.date) -> int:
-    days = {
-        _date_of(c["created_at"])
-        for c in checkins
-        if c["status"] == "scored"
-    }
-    streak = 0
-    cursor = today
-    while cursor in days:
-        streak += 1
-        cursor -= dt.timedelta(days=1)
-    return streak
-
-
-def vocab_all_done(checkins, today: dt.date) -> bool:
-    start = week_start(today)
-    required = {start + dt.timedelta(days=i) for i in range((today - start).days + 1)}
-    done = {
-        _date_of(c["created_at"])
-        for c in checkins
-        if c["status"] == "scored" and int(c.get("is_vocab") or 0) == 1
-    }
-    return required.issubset(done)
 
 
 def computer_today(sessions, now: dt.datetime):
@@ -80,7 +47,7 @@ def computer_today(sessions, now: dt.datetime):
     return total_min, segments
 
 
-def progress_ratio(week_pts: int, goal: int) -> float:
+def progress_ratio(period_pts: int, goal: int) -> float:
     if goal <= 0:
         return 1.0
-    return min(1.0, week_pts / goal)
+    return min(1.0, period_pts / goal)

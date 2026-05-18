@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>第 {{ period_seq }} 期回看</h1>
+<p class="muted">{{ period_started }} ~ {{ period_ended }} · 本周期累计 <b>{{ period_total }}</b> 分</p>
+{% for f in feed %}
+<div class="card">
+  <div class="muted">{{ f["created_at"][:16].replace("T"," ") }} ·
+    {% if f["kind"]=="fixed" %}{{ f["task_name"] }}
+    {% else %}{{ f["title"] }}{% endif %}
+    · {% if f["status"]=="scored" %}<b>{{ f["awarded_points"] }} 分</b>
+      {% elif f["status"]=="pending" %}<span style="color:#e67e22">待定</span>
+      {% else %}<span style="color:#c0392b">已驳回</span>{% endif %}</div>
+  {% if f["mood"] %}<p>{{ f["mood"] }}</p>{% endif %}
+  {% if f["note"] %}<p>{{ f["note"] }}</p>{% endif %}
+  {% if f["photo_path"] %}<img class="photo" src="{{ f['photo_path'] }}">{% endif %}
+  <div>{% for rc in f["reactions"] %}<span class="stamp">{{ rc["kind"] }}</span>{% endfor %}</div>
+  {% for cm in f["comments"] %}
+    <p class="muted"><b>{{ cm["author_name"] }}</b>：{{ cm["body"] }}</p>
+  {% endfor %}
+</div>
+{% else %}<p class="muted">该周期没有打卡记录。</p>{% endfor %}
+<p><a href="/history">← 回历史列表</a> · <a href="/">回看板</a></p>
+{% endblock %}

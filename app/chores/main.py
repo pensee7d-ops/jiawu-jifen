@@ -1,10 +1,12 @@
 import os
 import datetime as dt
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from chores.config import Config
 from chores import db as dbmod
@@ -12,17 +14,22 @@ from chores import auth, scoring
 from chores.images import save_photo
 
 BASE = os.path.dirname(__file__)
+_TZ = ZoneInfo("Asia/Shanghai")
+CHECKIN_NAME = "浩哥"
 
 
 def _now() -> dt.datetime:
-    return dt.datetime.now()
+    """北京时间（naive，与库内存储格式一致）。"""
+    return dt.datetime.now(_TZ).replace(tzinfo=None)
 
 
 def create_app() -> FastAPI:
     cfg = Config.from_env()
     conn = dbmod.connect(cfg.db_path)
     dbmod.init_schema(conn)
+    dbmod.migrate(conn)
     dbmod.seed_defaults(conn)
+    dbmod.ensure_open_period(conn, _now().isoformat(timespec="seconds"))
     os.makedirs(cfg.photo_dir, exist_ok=True)
 
     app = FastAPI()
@@ -34,6 +41,36 @@ def create_app() -> FastAPI:
     app.state.cfg = cfg
     app.state.conn = conn
     app.state.templates = templates
+
+    def _period_rows(pid: int):
+        rows = conn.execute(
+            "SELECT c.*, t.name AS task_name FROM checkins c "
+            "LEFT JOIN task_catalog t ON c.task_id=t.id WHERE c.period_id=?",
+            (pid,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _build_feed(rows):
+        """动态只展示打卡（排除监管者的 adjustment 调整记录）。"""
+        feed = sorted(
+            (r for r in rows if r["kind"] != "adjustment"),
+            key=lambda r: r["created_at"],
+            reverse=True,
+        )[:50]
+        for f in feed:
+            f["comments"] = [
+                dict(x) for x in conn.execute(
+                    "SELECT author_name, author_role, body, created_at "
+                    "FROM comments WHERE checkin_id=? ORDER BY id", (f["id"],)
+                ).fetchall()
+            ]
+            f["reactions"] = [
+                dict(x) for x in conn.execute(
+                    "SELECT author_name, kind FROM reactions WHERE checkin_id=?",
+                    (f["id"],)
+                ).fetchall()
+            ]
+        return feed
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request, error: str = ""):
@@ -51,7 +88,7 @@ def create_app() -> FastAPI:
         request.session["role"] = role
         if role == auth.ROLE_SUPERVISOR:
             return RedirectResponse("/whoami", status_code=303)
-        request.session["name"] = "弟弟"
+        request.session["name"] = CHECKIN_NAME
         return RedirectResponse("/", status_code=303)
 
     @app.get("/logout")
@@ -106,26 +143,28 @@ def create_app() -> FastAPI:
         if photo is not None:
             raw = await photo.read()
             if raw:
-                photo_path = save_photo(raw, cfg.photo_dir)
+                # 压缩在线程池跑，不阻塞单进程事件循环。
+                photo_path = await run_in_threadpool(save_photo, raw, cfg.photo_dir)
         now = _now().isoformat(timespec="seconds")
+        pid = dbmod.ensure_open_period(conn, now)
         if kind == "fixed":
             t = conn.execute(
                 "SELECT default_points FROM task_catalog WHERE id=?", (task_id,)
             ).fetchone()
             pts = scoring.award_for_fixed(t)
             conn.execute(
-                "INSERT INTO checkins (kind, task_id, photo_path, note, mood,"
-                " awarded_points, status, created_at) VALUES "
-                "(?,?,?,?,?,?,'scored',?)",
-                (kind, int(task_id), photo_path, note, mood, pts, now),
+                "INSERT INTO checkins (kind, task_id, period_id, photo_path, note,"
+                " mood, awarded_points, status, created_at) VALUES "
+                "(?,?,?,?,?,?,?,'scored',?)",
+                (kind, int(task_id), pid, photo_path, note, mood, pts, now),
             )
         else:
             prop = int(proposed_points) if proposed_points.strip() else None
             conn.execute(
-                "INSERT INTO checkins (kind, title, photo_path, note, mood,"
-                " proposed_points, status, created_at) VALUES "
-                "(?,?,?,?,?,?,'pending',?)",
-                ("adhoc", title, photo_path, note, mood, prop, now),
+                "INSERT INTO checkins (kind, period_id, title, photo_path, note,"
+                " mood, proposed_points, status, created_at) VALUES "
+                "(?,?,?,?,?,?,?,'pending',?)",
+                ("adhoc", pid, title, photo_path, note, mood, prop, now),
             )
         conn.commit()
         return RedirectResponse("/", status_code=303)
@@ -164,45 +203,33 @@ def create_app() -> FastAPI:
     def dashboard(request: Request):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
-        today = _now().date()
-        rows = conn.execute(
-            "SELECT c.*, t.is_vocab AS is_vocab, t.name AS task_name "
-            "FROM checkins c LEFT JOIN task_catalog t ON c.task_id=t.id"
-        ).fetchall()
-        rows = [dict(r) for r in rows]
+        now = _now()
+        today = now.date()
+        period = dbmod.current_period(conn)
+        if period is None:
+            dbmod.ensure_open_period(conn, now.isoformat(timespec="seconds"))
+            period = dbmod.current_period(conn)
+        rows = _period_rows(period["id"])
         sessions = [
             dict(r) for r in conn.execute(
                 "SELECT start_at, end_at FROM computer_sessions"
             ).fetchall()
         ]
-        comp_min, comp_seg = scoring.computer_today(sessions, _now())
+        comp_min, comp_seg = scoring.computer_today(sessions, now)
         ann = conn.execute(
             "SELECT body FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        feed = sorted(rows, key=lambda r: r["created_at"], reverse=True)[:30]
-        for f in feed:
-            f["comments"] = [
-                dict(x) for x in conn.execute(
-                    "SELECT author_name, author_role, body, created_at "
-                    "FROM comments WHERE checkin_id=? ORDER BY id", (f["id"],)
-                ).fetchall()
-            ]
-            f["reactions"] = [
-                dict(x) for x in conn.execute(
-                    "SELECT author_name, kind FROM reactions WHERE checkin_id=?",
-                    (f["id"],)
-                ).fetchall()
-            ]
-        wk = scoring.week_total(rows, today)
+        feed = _build_feed(rows)
+        total = scoring.period_total(rows)
         ctx = {
             "request": request,
             "role": auth.current_role(request),
             "name": auth.current_name(request),
-            "week_total": wk,
+            "period_seq": period["seq"],
+            "period_started": period["started_at"][:10],
+            "period_total": total,
             "today_total": scoring.today_total(rows, today),
-            "streak": scoring.streak_days(rows, today),
-            "vocab_ok": scoring.vocab_all_done(rows, today),
-            "progress": int(scoring.progress_ratio(wk, cfg.weekly_goal) * 100),
+            "progress": int(scoring.progress_ratio(total, cfg.weekly_goal) * 100),
             "goal": cfg.weekly_goal,
             "comp_min": comp_min,
             "comp_seg": comp_seg,
@@ -211,9 +238,77 @@ def create_app() -> FastAPI:
         }
         return templates.TemplateResponse("dashboard.html", ctx)
 
+    @app.get("/history", response_class=HTMLResponse)
+    def history_list(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        periods = conn.execute(
+            "SELECT * FROM periods WHERE ended_at IS NOT NULL ORDER BY id DESC"
+        ).fetchall()
+        items = []
+        for p in periods:
+            agg = conn.execute(
+                "SELECT COALESCE(SUM(awarded_points),0) AS total,"
+                " SUM(CASE WHEN kind!='adjustment' THEN 1 ELSE 0 END) AS n "
+                "FROM checkins WHERE period_id=? AND status='scored'", (p["id"],)
+            ).fetchone()
+            items.append({
+                "id": p["id"], "seq": p["seq"],
+                "started": p["started_at"][:10], "ended": p["ended_at"][:10],
+                "total": agg["total"], "n": agg["n"] or 0,
+            })
+        return templates.TemplateResponse(
+            "history.html", {"request": request, "items": items}
+        )
+
+    @app.get("/history/{pid}", response_class=HTMLResponse)
+    def history_detail(request: Request, pid: int):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        period = conn.execute(
+            "SELECT * FROM periods WHERE id=?", (pid,)
+        ).fetchone()
+        if period is None:
+            return RedirectResponse("/history", status_code=303)
+        rows = _period_rows(pid)
+        ctx = {
+            "request": request,
+            "period_seq": period["seq"],
+            "period_started": period["started_at"][:10],
+            "period_ended": period["ended_at"][:10] if period["ended_at"] else "",
+            "period_total": scoring.period_total(rows),
+            "feed": _build_feed(rows),
+        }
+        return templates.TemplateResponse("history_detail.html", ctx)
+
+    @app.get("/archive", response_class=HTMLResponse)
+    def archive_confirm(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        period = dbmod.current_period(conn)
+        rows = _period_rows(period["id"]) if period else []
+        n = len([r for r in rows if r["kind"] != "adjustment"])
+        ctx = {
+            "request": request,
+            "period_seq": period["seq"] if period else 0,
+            "period_started": period["started_at"][:10] if period else "",
+            "period_total": scoring.period_total(rows),
+            "checkin_n": n,
+        }
+        return templates.TemplateResponse("archive_confirm.html", ctx)
+
+    @app.post("/archive")
+    def archive_do(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        dbmod.archive_period(conn, _now().isoformat(timespec="seconds"))
+        return RedirectResponse("/", status_code=303)
+
     def _author(request: Request):
         role = auth.current_role(request)
-        name = auth.current_name(request) or ("弟弟" if role == auth.ROLE_CHECKIN else "监管者")
+        name = auth.current_name(request) or (
+            CHECKIN_NAME if role == auth.ROLE_CHECKIN else "监管者"
+        )
         return role, name
 
     @app.post("/checkin/{cid}/comment")
@@ -284,11 +379,12 @@ def create_app() -> FastAPI:
             return RedirectResponse("/login", status_code=303)
         reviewer = auth.current_name(request) or "监管者"
         now = _now().isoformat(timespec="seconds")
+        pid = dbmod.ensure_open_period(conn, now)
         conn.execute(
-            "INSERT INTO checkins (kind, title, note, awarded_points, status,"
-            " created_at, reviewed_by, reviewed_at) VALUES "
-            "('adjustment',?,?,?, 'scored', ?, ?, ?)",
-            ("分值调整", reason, int(points), now, reviewer, now),
+            "INSERT INTO checkins (kind, period_id, title, note, awarded_points,"
+            " status, created_at, reviewed_by, reviewed_at) VALUES "
+            "('adjustment',?,?,?,?, 'scored', ?, ?, ?)",
+            (pid, "分值调整", reason, int(points), now, reviewer, now),
         )
         conn.commit()
         return RedirectResponse("/", status_code=303)
@@ -308,15 +404,15 @@ def create_app() -> FastAPI:
     def catalog_edit(
         request: Request, op: str = Form(...),
         task_id: str = Form(""), name: str = Form(""),
-        points: str = Form("0"), is_vocab: str = Form("0")
+        points: str = Form("0")
     ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
         if op == "add" and name.strip():
             conn.execute(
-                "INSERT INTO task_catalog (name, default_points, is_vocab, sort_order)"
-                " VALUES (?,?,?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM task_catalog))",
-                (name.strip(), int(points or 0), int(is_vocab or 0)),
+                "INSERT INTO task_catalog (name, default_points, sort_order)"
+                " VALUES (?,?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM task_catalog))",
+                (name.strip(), int(points or 0)),
             )
         elif op == "deactivate":
             conn.execute("UPDATE task_catalog SET active=0 WHERE id=?", (task_id,))
@@ -324,8 +420,8 @@ def create_app() -> FastAPI:
             conn.execute("UPDATE task_catalog SET active=1 WHERE id=?", (task_id,))
         elif op == "update":
             conn.execute(
-                "UPDATE task_catalog SET name=?, default_points=?, is_vocab=? WHERE id=?",
-                (name.strip(), int(points or 0), int(is_vocab or 0), task_id),
+                "UPDATE task_catalog SET name=?, default_points=? WHERE id=?",
+                (name.strip(), int(points or 0), task_id),
             )
         conn.commit()
         return RedirectResponse("/admin/catalog", status_code=303)

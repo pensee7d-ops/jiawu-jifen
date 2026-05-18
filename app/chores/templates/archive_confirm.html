@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>归档进入新周期</h1>
+<div class="card">
+  <p>当前是<b>第 {{ period_seq }} 期</b>（自 {{ period_started }} 起）。</p>
+  <p>本周期累计 <b>{{ period_total }}</b> 分，共 <b>{{ checkin_n }}</b> 条打卡。</p>
+  <p class="muted">归档后：本周期会被封存（可在「历史周期」回看），
+    计数清零，立即进入新的第 {{ period_seq + 1 }} 期。此操作不可撤销。</p>
+  <form method="post" action="/archive">
+    <button style="background:#e67e22">确认归档，开启新周期</button>
+  </form>
+</div>
+<p><a href="/">← 取消，回看板</a></p>
+{% endblock %}
