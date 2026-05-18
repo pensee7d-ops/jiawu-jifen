@@ -2,6 +2,7 @@ import sqlite3
 from chores.db import (
     connect, init_schema, migrate, seed_defaults,
     current_period, ensure_open_period, archive_period,
+    get_setting, set_setting,
 )
 
 
@@ -37,6 +38,17 @@ def test_seed_defaults_is_idempotent(tmp_path):
     sups = [r["name"] for r in conn.execute(
         "SELECT name FROM supervisors ORDER BY id").fetchall()]
     assert sups == ["惠姐", "帝哥"]
+    assert get_setting(conn, "period_goal") == "80"
+
+
+def test_settings_set_and_get_and_upsert(tmp_path):
+    conn = connect(str(tmp_path / "t.db"))
+    init_schema(conn)
+    assert get_setting(conn, "x", "fallback") == "fallback"
+    set_setting(conn, "x", 50)
+    assert get_setting(conn, "x") == "50"
+    set_setting(conn, "x", 80)          # upsert，不报 UNIQUE
+    assert get_setting(conn, "x") == "80"
 
 
 def test_migrate_adds_period_id_to_legacy_checkins(tmp_path):

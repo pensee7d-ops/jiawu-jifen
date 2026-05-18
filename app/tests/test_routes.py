@@ -269,6 +269,21 @@ def test_set_announcement(client):
     assert "五一" in row["body"]
 
 
+def test_supervisor_sets_period_goal_reflected_on_dashboard(client):
+    _sup(client)
+    # 默认目标 80
+    r = client.get("/")
+    assert "/80" in r.text
+    # 改成 50，无需重启/发版
+    r = client.post("/admin/announcement", data={"body": "", "goal": "50"})
+    assert r.status_code == 303
+    r = client.get("/")
+    assert "/50" in r.text
+    assert client.app.state.conn.execute(
+        "SELECT value FROM settings WHERE key='period_goal'"
+    ).fetchone()["value"] == "50"
+
+
 def test_catalog_requires_supervisor(client):
     _login_checkin(client)
     r = client.get("/admin/catalog")

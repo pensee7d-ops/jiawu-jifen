@@ -117,6 +117,28 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
     if conn.execute("SELECT COUNT(*) AS c FROM supervisors").fetchone()["c"] == 0:
         for nm in DEFAULT_SUPERVISORS:
             conn.execute("INSERT INTO supervisors (name) VALUES (?)", (nm,))
+    if conn.execute(
+        "SELECT COUNT(*) AS c FROM settings WHERE key='period_goal'"
+    ).fetchone()["c"] == 0:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('period_goal', '80')"
+        )
+    conn.commit()
+
+
+def get_setting(conn: sqlite3.Connection, key: str, default=None):
+    r = conn.execute(
+        "SELECT value FROM settings WHERE key=?", (key,)
+    ).fetchone()
+    return r["value"] if r else default
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
     conn.commit()
 
 

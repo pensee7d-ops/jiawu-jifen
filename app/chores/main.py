@@ -42,6 +42,13 @@ def create_app() -> FastAPI:
     app.state.conn = conn
     app.state.templates = templates
 
+    def _goal() -> int:
+        v = dbmod.get_setting(conn, "period_goal", str(cfg.weekly_goal))
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return cfg.weekly_goal
+
     def _period_rows(pid: int):
         rows = conn.execute(
             "SELECT c.*, t.name AS task_name FROM checkins c "
@@ -221,6 +228,7 @@ def create_app() -> FastAPI:
         ).fetchone()
         feed = _build_feed(rows)
         total = scoring.period_total(rows)
+        goal = _goal()
         ctx = {
             "request": request,
             "role": auth.current_role(request),
@@ -229,8 +237,8 @@ def create_app() -> FastAPI:
             "period_started": period["started_at"][:10],
             "period_total": total,
             "today_total": scoring.today_total(rows, today),
-            "progress": int(scoring.progress_ratio(total, cfg.weekly_goal) * 100),
-            "goal": cfg.weekly_goal,
+            "progress": int(scoring.progress_ratio(total, goal) * 100),
+            "goal": goal,
             "comp_min": comp_min,
             "comp_seg": comp_seg,
             "announcement": ann["body"] if ann else "",
@@ -435,13 +443,21 @@ def create_app() -> FastAPI:
         ).fetchone()
         return templates.TemplateResponse(
             "announcement.html",
-            {"request": request, "current": cur["body"] if cur else ""},
+            {
+                "request": request,
+                "current": cur["body"] if cur else "",
+                "goal": _goal(),
+            },
         )
 
     @app.post("/admin/announcement")
-    def announcement_set(request: Request, body: str = Form(...)):
+    def announcement_set(
+        request: Request, body: str = Form(""), goal: str = Form("")
+    ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
+        if goal.strip().isdigit():
+            dbmod.set_setting(conn, "period_goal", int(goal.strip()))
         conn.execute("UPDATE announcements SET active=0 WHERE active=1")
         conn.execute(
             "INSERT INTO announcements (body, created_at, active) VALUES (?,?,1)",

@@ -1,10 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>本周目标 / 规则公告</h1>
+<h1>本周期目标 / 规则公告</h1>
 <form method="post" action="/admin/announcement">
+  <label>本周期目标分（看板进度条用，常规双休一般 50 或 80，随时可改）</label>
+  <input type="number" name="goal" value="{{ goal }}" min="0">
+  <label>规则公告（文字说明，给全家看）</label>
   <textarea name="body" rows="6"
     placeholder="如：五一假期 每日达 60 分玩 3h，超额另定">{{ current }}</textarea>
-  <button>发布</button>
+  <button>保存</button>
 </form>
 <p><a href="/">← 回看板</a></p>
 {% endblock %}
