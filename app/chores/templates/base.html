@@ -3,10 +3,66 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>家务积分打卡</title>
+<meta name="theme-color" content="#17152c">
+<title>{% block title %}家务积分站{% endblock %}</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="wrap">{% block content %}{{ body }}{% endblock %}</div>
+<div class="sky-pixels" aria-hidden="true"></div>
+<div class="wrap">
+  {% if request.session.get('role') %}
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-gem">◆</span> 家务勇者村</a>
+    <span class="player-tag">{{ request.session.get('name','玩家') }}</span>
+  </header>
+  {% endif %}
+  <main>{% block content %}{{ body }}{% endblock %}</main>
+</div>
+{% if request.session.get('role') %}
+<nav class="bottom-nav" aria-label="主导航">
+  <a href="/"><span>⌂</span>看板</a>
+  <a href="/missions"><span>!</span>任务</a>
+  {% if request.session.get('role') == 'checkin' %}<a href="/checkin"><span>＋</span>打卡</a>
+  {% else %}<a href="/admin/trash"><span>⚙</span>管理</a>{% endif %}
+  <a href="/points"><span>◇</span>账本</a>
+  <a href="/computer/history"><span>▣</span>电脑</a>
+</nav>
+{% endif %}
+<script>
+document.querySelectorAll('.photo-input').forEach(function (input) {
+  var group = input.dataset.photoGroup;
+  var preview = document.getElementById(input.dataset.preview);
+  var clear = document.querySelector('[data-clear-group="' + group + '"]');
+  input.addEventListener('change', function () {
+    if (!preview || !input.files || !input.files[0]) return;
+    document.querySelectorAll('.photo-input[data-photo-group="' + group + '"]').forEach(function (other) {
+      if (other !== input) other.value = '';
+    });
+    preview.src = URL.createObjectURL(input.files[0]);
+    preview.hidden = false;
+    if (clear) clear.hidden = false;
+  });
+  if (clear) clear.addEventListener('click', function () {
+    document.querySelectorAll('.photo-input[data-photo-group="' + group + '"]').forEach(function (item) { item.value = ''; });
+    preview.src = ''; preview.hidden = true; clear.hidden = true;
+  });
+});
+document.querySelectorAll('[data-mode-select]').forEach(function (select) {
+  function syncMode() {
+    var root = select.closest('form');
+    root.querySelectorAll('[data-weekly-fields]').forEach(function (box) {
+      var weekly = select.value === 'weekly';
+      box.hidden = !weekly;
+      box.querySelectorAll('select,input').forEach(function (field) { field.disabled = !weekly; });
+    });
+  }
+  select.addEventListener('change', syncMode); syncMode();
+});
+document.querySelectorAll('[data-confirm]').forEach(function (button) {
+  button.addEventListener('click', function (event) {
+    if (!confirm(button.dataset.confirm)) event.preventDefault();
+  });
+});
+</script>
 </body>
 </html>

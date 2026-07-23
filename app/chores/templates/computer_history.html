@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}电脑记录 · 家务勇者村{% endblock %}
+{% block content %}
+<span class="eyebrow">PLAY TIME LOG</span><h1>电脑使用记录</h1>
+<section class="stat-grid three"><div class="pixel-card kpi-box"><small>今日额度</small><b>{{ summary.allowance }}</b></div><div class="pixel-card kpi-box"><small>已用分钟</small><b>{{ summary.used }}</b></div><div class="pixel-card kpi-box {{ 'bad' if summary.overrun }}"><small>{{ '超时' if summary.overrun else '剩余' }}</small><b>{{ summary.overrun or summary.remaining }}</b></div></section>
+<h2>今日额度构成</h2>{% for g in summary.grants %}<div class="ledger-row"><span class="ledger-icon">{{ '+' if g['minutes'] >= 0 else '−' }}</span><div><b>{{ g['description'] }}</b><small>{{ g['grant_type'] }} · {{ g['actor_name'] }}</small></div><strong>{{ g['minutes'] }} 分钟</strong></div>{% else %}<p class="muted">今日没有时长额度。</p>{% endfor %}
+<h2>开关机明细</h2>{% for s in sessions %}<article class="ledger-row"><span class="status-dot {{ 'online' if not s['end_at'] }}"></span><div><b>{{ s['start_at'][:16].replace('T',' ') }} → {{ s['end_at'][:16].replace('T',' ') if s['end_at'] else '使用中' }}</b><small>开机：{{ s['started_by'] or '旧系统记录' }}{% if s['ended_by'] %} · 关机：{{ s['ended_by'] }}{% endif %}</small></div></article>{% else %}<div class="empty-state">▣<p>还没有电脑记录</p></div>{% endfor %}
+{% endblock %}

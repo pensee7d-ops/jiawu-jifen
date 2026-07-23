@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}任务广场 · 家务勇者村{% endblock %}
+{% block content %}
+<span class="eyebrow">QUEST BOARD</span><h1>任务广场</h1>
+{% if request.query_params.get('error') %}<div class="notice error">{{ request.query_params.get('error') }}</div>{% endif %}
+{% for m in missions %}
+<article class="pixel-card quest-card status-{{ m['status'] }}">
+  <div class="quest-header"><span class="quest-mark">!</span><div><h2>{{ m['title'] }}</h2>
+    <span class="status-badge">{% if m['status']=='open' %}待领取{% elif m['status']=='claimed' %}进行中{% elif m['status']=='submitted' %}待审核{% elif m['status']=='completed' %}已完成{% elif m['status']=='rejected' %}已驳回{% elif m['status']=='cancelled' %}已取消{% else %}已过期{% endif %}</span>
+  </div><b class="xp">+{{ m['points'] }} XP</b></div>
+  {% if m['description'] %}<p>{{ m['description'] }}</p>{% endif %}
+  <p class="muted">发布者 {{ m['published_by'] }}{% if m['deadline_at'] %} · 截止 {{ m['deadline_at'][:16].replace('T',' ') }}{% endif %} · {{ '需要照片' if m['photo_required'] else '照片可选' }}</p>
+  {% if m['rejection_reason'] %}<div class="notice error">上次驳回：{{ m['rejection_reason'] }}</div>{% endif %}
+  {% if role == 'checkin' and m['status']=='open' %}<form method="post" action="/missions/{{ m['id'] }}/claim"><button class="btn green wide">领取任务</button></form>{% endif %}
+  {% if role == 'checkin' and m['status']=='claimed' %}<form method="post" action="/missions/{{ m['id'] }}/submit" enctype="multipart/form-data" class="submission-form">
+    <textarea name="note" placeholder="说说你是怎么完成的"></textarea>
+    <fieldset class="photo-picker"><legend>完成照片{{ '（必需）' if m['photo_required'] else '（可选）' }}</legend><div class="photo-actions">
+      <label class="btn ghost file-button">📷 现场拍照<input class="photo-input" data-photo-group="mission-{{ m['id'] }}" data-preview="mission-preview-{{ m['id'] }}" type="file" name="photo_camera" accept="image/*" capture="environment"></label>
+      <label class="btn ghost file-button">▧ 从相册选择<input class="photo-input" data-photo-group="mission-{{ m['id'] }}" data-preview="mission-preview-{{ m['id'] }}" type="file" name="photo_album" accept="image/*"></label>
+    </div></fieldset>
+    <img id="mission-preview-{{ m['id'] }}" class="photo preview" alt="照片预览" hidden>
+    <button type="button" class="btn ghost small" data-clear-group="mission-{{ m['id'] }}" hidden>移除照片</button>
+    <button class="btn green">提交验收</button>
+  </form>{% endif %}
+  {% if m['photo_path'] %}<img class="photo" src="{{ m['photo_path'] }}" alt="任务完成照片">{% endif %}
+</article>
+{% else %}<div class="empty-state">!<p>现在没有任务，先自由探索吧</p></div>{% endfor %}
+{% endblock %}

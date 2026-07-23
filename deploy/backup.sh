@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-SRC=/opt/chores/app/data
+SRC=/opt/chores/jiawu-jifen/app/data
 DEST=/opt/chores/backups
 STAMP=$(date +%F-%H%M)
 mkdir -p "$DEST"

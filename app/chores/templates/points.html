@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}积分账本 · 家务勇者村{% endblock %}
+{% block content %}
+<span class="eyebrow">POINT LEDGER</span><h1>积分账本</h1>
+<section class="stat-grid three">
+  <div class="pixel-card kpi-box"><small>可用余额</small><b>{{ summary.balance }}</b></div>
+  <div class="pixel-card kpi-box good"><small>累计赚取</small><b>+{{ summary.earned }}</b></div>
+  <div class="pixel-card kpi-box bad"><small>累计扣减</small><b>-{{ summary.deducted }}</b></div>
+</section>
+<div class="filter-tabs">
+  <a class="{{ 'active' if not kind }}" href="/points">全部</a>
+  <a class="{{ 'active' if kind=='earn' }}" href="/points?kind=earn">赚取</a>
+  <a class="{{ 'active' if kind=='adjustment' }}" href="/points?kind=adjustment">调整</a>
+  <a class="{{ 'active' if kind=='settlement' }}" href="/points?kind=settlement">兑换</a>
+</div>
+<div class="ledger-list">{% for row in rows %}
+  <article class="ledger-row">
+    <span class="ledger-icon">{{ '＋' if row['delta'] >= 0 else '−' }}</span>
+    <div><b>{{ row['description'] }}</b><small>{{ row['created_at'][:16].replace('T',' ') }} · {{ row['actor_name'] or '系统' }}</small></div>
+    <strong class="{{ 'positive' if row['delta'] >= 0 else 'negative' }}">{{ '+' if row['delta'] >= 0 else '' }}{{ row['delta'] }}</strong>
+    {% if request.session.get('role') == 'supervisor' and row['source_type'] in ['checkin','legacy_checkin','mission'] %}<details class="ledger-delete"><summary>回收</summary><form method="post" action="/admin/records/ledger/{{ row['id'] }}/trash"><input type="hidden" name="return_to" value="/points"><input name="reason" required placeholder="删除原因"><button class="btn red small">确认</button></form></details>{% endif %}
+  </article>
+{% else %}<div class="empty-state">◇<p>还没有积分流水</p></div>{% endfor %}</div>
+{% endblock %}

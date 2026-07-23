@@ -153,9 +153,11 @@ def test_dashboard_shows_week_and_today_totals(client):
 
 
 def test_comment_records_author_name_and_role(client):
+    _login_checkin(client)
+    cid = _make_fixed_checkin(client)
+    client.get("/logout")
     client.post("/login", data={"password": "jia"})
     client.post("/whoami", data={"name": "惠姐"})
-    cid = _make_fixed_checkin(client)
     r = client.post(f"/checkin/{cid}/comment", data={"body": "干得漂亮！"})
     assert r.status_code == 303
     row = client.app.state.conn.execute(
@@ -167,9 +169,11 @@ def test_comment_records_author_name_and_role(client):
 
 
 def test_react_records_stamp(client):
+    _login_checkin(client)
+    cid = _make_fixed_checkin(client)
+    client.get("/logout")
     client.post("/login", data={"password": "jia"})
     client.post("/whoami", data={"name": "惠姐"})
-    cid = _make_fixed_checkin(client)
     r = client.post(f"/checkin/{cid}/react", data={"kind": "🏅"})
     assert r.status_code == 303
     row = client.app.state.conn.execute(
@@ -357,3 +361,202 @@ def test_now_is_beijing_time():
     delta = _now() - dt.datetime.utcnow()
     # 北京 = UTC+8，留 5 分钟容差
     assert dt.timedelta(hours=7, minutes=55) < delta < dt.timedelta(hours=8, minutes=5)
+
+
+def test_photo_picker_allows_album_and_rejects_bad_image(client):
+    _login_checkin(client)
+    page = client.get("/checkin")
+    assert 'name="photo_camera"' in page.text and 'capture="environment"' in page.text
+    assert 'name="photo_album" accept="image/*"' in page.text
+    assert "从相册选择" in page.text
+    result = client.post(
+        "/checkin",
+        data={"kind": "fixed", "task_id": "1"},
+        files={"photo": ("bad.jpg", b"not-an-image", "image/jpeg")},
+    )
+    assert result.status_code == 400
+    assert "格式不支持" in result.text
+
+
+def test_stage_and_mission_flow_awards_points_once(client):
+    _sup(client)
+    client.post("/admin/stages", data={
+        "op": "add", "name": "测试暑假", "starts_on": "2020-01-01",
+        "ends_on": "2035-12-31", "mode": "daily", "cutoff_hour": "4",
+        "window_start_weekday": "4", "window_end_weekday": "0",
+        "points_goal": "30", "basic_minutes": "120", "reward_minutes": "120",
+    })
+    stage_id = client.app.state.conn.execute(
+        "SELECT id FROM stages ORDER BY id DESC LIMIT 1"
+    ).fetchone()["id"]
+    client.post(f"/admin/stages/{stage_id}/switch")
+    client.post("/admin/missions", data={
+        "title": "整理书桌", "description": "收干净", "points": "40",
+        "deadline_at": "", "photo_required": "0",
+    })
+    mid = client.app.state.conn.execute(
+        "SELECT id FROM missions ORDER BY id DESC LIMIT 1"
+    ).fetchone()["id"]
+    client.get("/logout")
+    _login_checkin(client)
+    assert client.post(f"/missions/{mid}/claim").status_code == 303
+    assert client.post(f"/missions/{mid}/submit", data={"note": "完成"}).status_code == 303
+    client.get("/logout")
+    _sup(client)
+    assert client.post(
+        f"/admin/missions/{mid}/review",
+        data={"action": "approve", "points": "40", "reason": ""},
+    ).status_code == 303
+    # 重复审核是无操作，积分来源唯一。
+    client.post(
+        f"/admin/missions/{mid}/review",
+        data={"action": "approve", "points": "40", "reason": ""},
+    )
+    conn = client.app.state.conn
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM point_ledger WHERE source_type='mission' AND source_id=?",
+        (str(mid),),
+    ).fetchone()["n"] == 1
+    assert conn.execute(
+        "SELECT reward_unlocked FROM settlement_windows ORDER BY id DESC LIMIT 1"
+    ).fetchone()["reward_unlocked"] == 1
+
+
+def test_computer_adjustment_and_correction_are_audited(client):
+    _sup(client)
+    client.post("/admin/computer/grant", data={
+        "logical_date": "2026-07-23", "minutes": "30", "reason": "表现很好",
+    })
+    client.post("/admin/computer/session", data={
+        "start_at": "2026-07-23T10:00", "end_at": "2026-07-23T11:00",
+        "reason": "补录",
+    })
+    conn = client.app.state.conn
+    session = conn.execute(
+        "SELECT * FROM computer_sessions WHERE source='manual' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert session is not None
+    client.post("/admin/computer/session", data={
+        "session_id": str(session["id"]), "start_at": "2026-07-23T10:05",
+        "end_at": "2026-07-23T11:00", "reason": "修正开始时间",
+    })
+    audits = conn.execute(
+        "SELECT * FROM computer_session_audits WHERE session_id=? ORDER BY id",
+        (session["id"],),
+    ).fetchall()
+    assert [a["action"] for a in audits] == ["create", "correct"]
+    assert audits[-1]["before_start"] == "2026-07-23T10:00"
+
+
+def test_new_supervisor_pages_render(client):
+    _sup(client)
+    for path in (
+        "/points", "/missions", "/admin/missions", "/admin/stages",
+        "/computer/history", "/admin/computer", "/admin/trash",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200, path
+
+
+def test_supervisor_cannot_open_or_submit_checkin(client):
+    _sup(client)
+    assert client.get("/checkin").headers["location"] == "/"
+    response = client.post("/checkin", data={"kind": "fixed", "task_id": "1"})
+    assert response.status_code == 303 and response.headers["location"] == "/"
+    assert client.app.state.conn.execute(
+        "SELECT COUNT(*) AS n FROM checkins"
+    ).fetchone()["n"] == 0
+
+
+def test_daily_stage_ignores_forged_weekdays_and_requires_switch(client):
+    _sup(client)
+    client.post("/admin/stages", data={
+        "name": "每日假期", "starts_on": "2020-01-01", "ends_on": "2035-12-31",
+        "mode": "daily", "cutoff_hour": "4", "window_start_weekday": "99",
+        "window_end_weekday": "-8", "points_goal": "30", "basic_minutes": "60",
+        "reward_minutes": "30",
+    })
+    stage = client.app.state.conn.execute("SELECT * FROM stages").fetchone()
+    assert stage["active"] == 0
+    assert (stage["window_start_weekday"], stage["window_end_weekday"]) == (4, 0)
+    client.post(f"/admin/stages/{stage['id']}/switch")
+    stage = client.app.state.conn.execute("SELECT * FROM stages").fetchone()
+    assert stage["active"] == 1 and stage["activated_at"]
+
+
+def test_trash_checkin_hides_points_revokes_reward_and_restores(client):
+    _sup(client)
+    client.post("/admin/stages", data={
+        "name": "测试阶段", "starts_on": "2020-01-01", "ends_on": "2035-12-31",
+        "mode": "daily", "cutoff_hour": "4", "points_goal": "10",
+        "basic_minutes": "60", "reward_minutes": "30",
+    })
+    conn = client.app.state.conn
+    stage_id = conn.execute("SELECT id FROM stages").fetchone()["id"]
+    client.post(f"/admin/stages/{stage_id}/switch")
+    client.get("/logout")
+    _login_checkin(client)
+    client.post("/checkin", data={"kind": "fixed", "task_id": "3"})
+    cid = conn.execute("SELECT id FROM checkins ORDER BY id DESC").fetchone()["id"]
+    assert conn.execute("SELECT reward_unlocked FROM settlement_windows").fetchone()[0] == 1
+    client.get("/logout")
+    _sup(client)
+    result = client.post(
+        f"/admin/records/checkin/{cid}/trash",
+        data={"reason": "测试记录", "return_to": "/points"},
+    )
+    assert result.headers["location"] == "/points"
+    assert conn.execute("SELECT deleted_at FROM checkins WHERE id=?", (cid,)).fetchone()[0]
+    assert conn.execute("SELECT deleted_at FROM point_ledger WHERE source_id=?", (str(cid),)).fetchone()[0]
+    assert conn.execute("SELECT reward_unlocked FROM settlement_windows").fetchone()[0] == 0
+    deletion_id = conn.execute("SELECT id FROM record_deletions ORDER BY id DESC").fetchone()[0]
+    client.post(f"/admin/trash/{deletion_id}/restore")
+    assert conn.execute("SELECT deleted_at FROM checkins WHERE id=?", (cid,)).fetchone()[0] is None
+    assert conn.execute("SELECT reward_unlocked FROM settlement_windows").fetchone()[0] == 1
+
+
+def test_system_ledger_cannot_be_deleted(client):
+    _sup(client)
+    conn = client.app.state.conn
+    conn.execute(
+        "INSERT INTO point_ledger (delta,entry_type,description,source_type,source_id,created_at) "
+        "VALUES (-10,'settlement','系统兑换','settlement_window','999','2026-01-01T04:00:00')"
+    )
+    conn.commit()
+    ledger_id = conn.execute("SELECT id FROM point_ledger").fetchone()[0]
+    response = client.post(
+        f"/admin/records/ledger/{ledger_id}/trash", data={"reason": "误删"},
+    )
+    assert response.headers["location"].startswith("/admin/trash?error=")
+    assert conn.execute("SELECT deleted_at FROM point_ledger WHERE id=?", (ledger_id,)).fetchone()[0] is None
+
+
+def test_feed_uses_logical_date_and_clamps_future(client):
+    import datetime as dt
+    from chores.main import _now
+    from chores.lifecycle import logical_date
+
+    _login_checkin(client)
+    conn = client.app.state.conn
+    day = logical_date(_now(), 4)
+    today_at = dt.datetime.combine(day, dt.time(hour=5))
+    yesterday_at = today_at - dt.timedelta(days=1)
+    pid = conn.execute("SELECT id FROM periods WHERE ended_at IS NULL").fetchone()[0]
+    conn.execute(
+        "INSERT INTO checkins (kind,period_id,title,note,awarded_points,status,created_at) "
+        "VALUES ('adhoc',?,'今天记录','ONLY_TODAY',1,'scored',?)",
+        (pid, today_at.isoformat(timespec="seconds")),
+    )
+    conn.execute(
+        "INSERT INTO checkins (kind,period_id,title,note,awarded_points,status,created_at) "
+        "VALUES ('adhoc',?,'昨天记录','ONLY_YESTERDAY',1,'scored',?)",
+        (pid, yesterday_at.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    today_page = client.get(f"/?feed_date={day.isoformat()}")
+    assert "ONLY_TODAY" in today_page.text and "ONLY_YESTERDAY" not in today_page.text
+    yesterday = day - dt.timedelta(days=1)
+    old_page = client.get(f"/?feed_date={yesterday.isoformat()}")
+    assert "ONLY_YESTERDAY" in old_page.text and "ONLY_TODAY" not in old_page.text
+    future_page = client.get("/?feed_date=2999-01-01")
+    assert f'value="{day.isoformat()}"' in future_page.text

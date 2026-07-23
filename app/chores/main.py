@@ -1,5 +1,6 @@
 import os
 import datetime as dt
+import uuid
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -10,8 +11,8 @@ from starlette.concurrency import run_in_threadpool
 
 from chores.config import Config
 from chores import db as dbmod
-from chores import auth, scoring
-from chores.images import save_photo
+from chores import auth, scoring, lifecycle, records
+from chores.images import save_photo, PhotoError
 
 BASE = os.path.dirname(__file__)
 _TZ = ZoneInfo("Asia/Shanghai")
@@ -30,7 +31,9 @@ def create_app() -> FastAPI:
     dbmod.migrate(conn)
     dbmod.seed_defaults(conn)
     dbmod.ensure_open_period(conn, _now().isoformat(timespec="seconds"))
+    lifecycle.ensure_state(conn, _now())
     os.makedirs(cfg.photo_dir, exist_ok=True)
+    records.purge_expired(conn, cfg.photo_dir, _now())
 
     app = FastAPI()
     app.add_middleware(SessionMiddleware, secret_key=cfg.secret_key)
@@ -42,6 +45,13 @@ def create_app() -> FastAPI:
     app.state.conn = conn
     app.state.templates = templates
 
+    @app.middleware("http")
+    async def keep_settlements_current(request: Request, call_next):
+        now = _now()
+        records.purge_expired(conn, cfg.photo_dir, now)
+        lifecycle.ensure_state(conn, now)
+        return await call_next(request)
+
     def _goal() -> int:
         v = dbmod.get_setting(conn, "period_goal", str(cfg.weekly_goal))
         try:
@@ -52,10 +62,33 @@ def create_app() -> FastAPI:
     def _period_rows(pid: int):
         rows = conn.execute(
             "SELECT c.*, t.name AS task_name FROM checkins c "
-            "LEFT JOIN task_catalog t ON c.task_id=t.id WHERE c.period_id=?",
+            "LEFT JOIN task_catalog t ON c.task_id=t.id WHERE c.period_id=? "
+            "AND c.deleted_at IS NULL",
             (pid,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def _sync_points(delta, entry_type, description, source_type, source_id, actor, now):
+        lifecycle.add_points(
+            conn, delta, entry_type, description, source_type, source_id, actor,
+            now.isoformat(timespec="seconds"),
+        )
+        conn.commit()
+        lifecycle.ensure_state(conn, now)
+
+    async def _save_upload(photo):
+        if photo is None:
+            return None
+        raw = await photo.read()
+        if not raw:
+            return None
+        return await run_in_threadpool(save_photo, raw, cfg.photo_dir)
+
+    async def _save_photo_choice(photo_camera, photo_album, legacy_photo=None):
+        choices = [p for p in (photo_camera, photo_album, legacy_photo) if p and p.filename]
+        if len(choices) > 1:
+            raise PhotoError("请只选择现场拍照或相册照片中的一种")
+        return await _save_upload(choices[0] if choices else None)
 
     def _build_feed(rows):
         """动态只展示打卡（排除监管者的 adjustment 调整记录）。"""
@@ -82,7 +115,7 @@ def create_app() -> FastAPI:
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request, error: str = ""):
         return templates.TemplateResponse(
-            "login.html", {"request": request, "error": error}
+            request, "login.html", {"request": request, "error": error}
         )
 
     @app.post("/login")
@@ -111,7 +144,7 @@ def create_app() -> FastAPI:
             "SELECT name FROM supervisors WHERE active=1 ORDER BY id"
         ).fetchall()
         return templates.TemplateResponse(
-            "whoami.html", {"request": request, "supervisors": sups}
+            request, "whoami.html", {"request": request, "supervisors": sups}
         )
 
     @app.post("/whoami")
@@ -122,15 +155,15 @@ def create_app() -> FastAPI:
         return RedirectResponse("/", status_code=303)
 
     @app.get("/checkin", response_class=HTMLResponse)
-    def checkin_form(request: Request):
-        if auth.current_role(request) is None:
-            return RedirectResponse("/login", status_code=303)
+    def checkin_form(request: Request, error: str = ""):
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/", status_code=303)
         tasks = conn.execute(
             "SELECT id, name, default_points FROM task_catalog "
             "WHERE active=1 ORDER BY sort_order, id"
         ).fetchall()
         return templates.TemplateResponse(
-            "checkin_form.html", {"request": request, "tasks": tasks}
+            request, "checkin_form.html", {"request": request, "tasks": tasks, "error": error}
         )
 
     @app.post("/checkin")
@@ -142,91 +175,143 @@ def create_app() -> FastAPI:
         proposed_points: str = Form(""),
         note: str = Form(""),
         mood: str = Form(""),
+        photo_camera: UploadFile = File(None),
+        photo_album: UploadFile = File(None),
         photo: UploadFile = File(None),
     ):
-        if auth.current_role(request) is None:
-            return RedirectResponse("/login", status_code=303)
-        photo_path = None
-        if photo is not None:
-            raw = await photo.read()
-            if raw:
-                # 压缩在线程池跑，不阻塞单进程事件循环。
-                photo_path = await run_in_threadpool(save_photo, raw, cfg.photo_dir)
-        now = _now().isoformat(timespec="seconds")
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/", status_code=303)
+        try:
+            photo_path = await _save_photo_choice(photo_camera, photo_album, photo)
+        except PhotoError as exc:
+            tasks = conn.execute(
+                "SELECT id, name, default_points FROM task_catalog "
+                "WHERE active=1 ORDER BY sort_order, id"
+            ).fetchall()
+            return templates.TemplateResponse(
+                request, "checkin_form.html",
+                {"request": request, "tasks": tasks, "error": str(exc)},
+                status_code=400,
+            )
+        now_dt = _now()
+        now = now_dt.isoformat(timespec="seconds")
         pid = dbmod.ensure_open_period(conn, now)
         if kind == "fixed":
             t = conn.execute(
-                "SELECT default_points FROM task_catalog WHERE id=?", (task_id,)
+                "SELECT name, default_points FROM task_catalog WHERE id=? AND active=1",
+                (task_id,),
             ).fetchone()
+            if t is None:
+                return RedirectResponse("/checkin?error=请选择有效任务", status_code=303)
             pts = scoring.award_for_fixed(t)
-            conn.execute(
+            cid = conn.execute(
                 "INSERT INTO checkins (kind, task_id, period_id, photo_path, note,"
                 " mood, awarded_points, status, created_at) VALUES "
                 "(?,?,?,?,?,?,?,'scored',?)",
                 (kind, int(task_id), pid, photo_path, note, mood, pts, now),
-            )
+            ).lastrowid
+            conn.commit()
+            _sync_points(pts, "earn", t["name"], "checkin", cid,
+                         auth.current_name(request) or CHECKIN_NAME, now_dt)
         else:
-            prop = int(proposed_points) if proposed_points.strip() else None
+            if not title.strip():
+                return RedirectResponse("/checkin?error=请填写做了什么", status_code=303)
+            try:
+                prop = int(proposed_points) if proposed_points.strip() else None
+            except ValueError:
+                return RedirectResponse("/checkin?error=建议分必须是整数", status_code=303)
             conn.execute(
                 "INSERT INTO checkins (kind, period_id, title, photo_path, note,"
                 " mood, proposed_points, status, created_at) VALUES "
                 "(?,?,?,?,?,?,?,'pending',?)",
                 ("adhoc", pid, title, photo_path, note, mood, prop, now),
             )
-        conn.commit()
+            conn.commit()
         return RedirectResponse("/", status_code=303)
 
     @app.post("/computer/on")
     def computer_on(request: Request):
-        if auth.current_role(request) is None:
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
             return RedirectResponse("/login", status_code=303)
         open_row = conn.execute(
-            "SELECT id FROM computer_sessions WHERE end_at IS NULL"
+            "SELECT id FROM computer_sessions WHERE end_at IS NULL AND deleted_at IS NULL"
         ).fetchone()
         if open_row is None:
             conn.execute(
-                "INSERT INTO computer_sessions (start_at) VALUES (?)",
-                (_now().isoformat(timespec="seconds"),),
+                "INSERT INTO computer_sessions (start_at,started_by,source,updated_at) "
+                "VALUES (?,?, 'web', ?)",
+                (_now().isoformat(timespec="seconds"),
+                 auth.current_name(request) or CHECKIN_NAME,
+                 _now().isoformat(timespec="seconds")),
             )
             conn.commit()
         return RedirectResponse("/", status_code=303)
 
     @app.post("/computer/off")
     def computer_off(request: Request):
-        if auth.current_role(request) is None:
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
             return RedirectResponse("/login", status_code=303)
         open_row = conn.execute(
-            "SELECT id FROM computer_sessions WHERE end_at IS NULL ORDER BY id DESC LIMIT 1"
+            "SELECT id FROM computer_sessions WHERE end_at IS NULL AND deleted_at IS NULL "
+            "ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if open_row is not None:
             conn.execute(
-                "UPDATE computer_sessions SET end_at=? WHERE id=?",
-                (_now().isoformat(timespec="seconds"), open_row["id"]),
+                "UPDATE computer_sessions SET end_at=?, ended_by=?, updated_at=? WHERE id=?",
+                (_now().isoformat(timespec="seconds"),
+                 auth.current_name(request) or CHECKIN_NAME,
+                 _now().isoformat(timespec="seconds"), open_row["id"]),
             )
             conn.commit()
         return RedirectResponse("/", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard(request: Request):
+    def dashboard(request: Request, feed_date: str = ""):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
         now = _now()
         today = now.date()
+        stage, window = lifecycle.ensure_state(conn, now)
         period = dbmod.current_period(conn)
         if period is None:
             dbmod.ensure_open_period(conn, now.isoformat(timespec="seconds"))
             period = dbmod.current_period(conn)
         rows = _period_rows(period["id"])
-        sessions = [
-            dict(r) for r in conn.execute(
-                "SELECT start_at, end_at FROM computer_sessions"
-            ).fetchall()
-        ]
-        comp_min, comp_seg = scoring.computer_today(sessions, now)
+        cutoff = int(stage["cutoff_hour"]) if stage else 4
+        computer = lifecycle.computer_summary(conn, now, cutoff)
+        points = lifecycle.point_summary(conn, stage, window)
         ann = conn.execute(
             "SELECT body FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        feed = _build_feed(rows)
+        conn.execute(
+            "UPDATE missions SET status='expired' WHERE status='open' "
+            "AND deadline_at IS NOT NULL AND deadline_at!='' AND deadline_at<?",
+            (now.isoformat(timespec="seconds"),),
+        )
+        conn.commit()
+        logical_today = lifecycle.logical_date(now, 4)
+        earliest = conn.execute(
+            "SELECT MIN(created_at) AS first_at FROM checkins WHERE deleted_at IS NULL "
+            "AND kind!='adjustment'"
+        ).fetchone()["first_at"]
+        earliest_date = lifecycle.logical_date(dt.datetime.fromisoformat(earliest), 4) if earliest else logical_today
+        min_feed_date = dt.date.fromisoformat(stage["starts_on"]) if stage else earliest_date
+        max_feed_date = min(
+            logical_today, dt.date.fromisoformat(stage["ends_on"]) if stage else logical_today,
+        )
+        try:
+            selected_date = dt.date.fromisoformat(feed_date) if feed_date else logical_today
+        except ValueError:
+            selected_date = logical_today
+        selected_date = min(max(selected_date, min_feed_date), max_feed_date)
+        feed_start = dt.datetime.combine(selected_date, dt.time(hour=4))
+        feed_end = feed_start + dt.timedelta(days=1)
+        feed_rows = [dict(r) for r in conn.execute(
+            "SELECT c.*,t.name AS task_name FROM checkins c LEFT JOIN task_catalog t ON t.id=c.task_id "
+            "WHERE c.deleted_at IS NULL AND c.created_at>=? AND c.created_at<? ORDER BY c.created_at DESC",
+            (feed_start.isoformat(timespec="seconds"), feed_end.isoformat(timespec="seconds")),
+        ).fetchall()]
+        feed = _build_feed(feed_rows)
         total = scoring.period_total(rows)
         goal = _goal()
         ctx = {
@@ -239,12 +324,27 @@ def create_app() -> FastAPI:
             "today_total": scoring.today_total(rows, today),
             "progress": int(scoring.progress_ratio(total, goal) * 100),
             "goal": goal,
-            "comp_min": comp_min,
-            "comp_seg": comp_seg,
+            "comp_min": computer["used"],
+            "comp_seg": len(computer["sessions"]),
+            "computer": computer,
+            "points": points,
+            "stage": dict(stage) if stage else None,
+            "window": dict(window) if window else None,
             "announcement": ann["body"] if ann else "",
             "feed": feed,
+            "feed_date": selected_date.isoformat(),
+            "feed_today": logical_today.isoformat(),
+            "feed_min": min_feed_date.isoformat(),
+            "feed_max": max_feed_date.isoformat(),
+            "feed_prev": (selected_date - dt.timedelta(days=1)).isoformat() if selected_date > min_feed_date else None,
+            "feed_next": (selected_date + dt.timedelta(days=1)).isoformat() if selected_date < max_feed_date else None,
+            "missions": [dict(r) for r in conn.execute(
+                "SELECT * FROM missions WHERE deleted_at IS NULL AND status IN ('open','claimed','submitted') "
+                "ORDER BY CASE status WHEN 'submitted' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END, id DESC "
+                "LIMIT 6"
+            ).fetchall()],
         }
-        return templates.TemplateResponse("dashboard.html", ctx)
+        return templates.TemplateResponse(request, "dashboard.html", ctx)
 
     @app.get("/history", response_class=HTMLResponse)
     def history_list(request: Request):
@@ -258,7 +358,7 @@ def create_app() -> FastAPI:
             agg = conn.execute(
                 "SELECT COALESCE(SUM(awarded_points),0) AS total,"
                 " SUM(CASE WHEN kind!='adjustment' THEN 1 ELSE 0 END) AS n "
-                "FROM checkins WHERE period_id=? AND status='scored'", (p["id"],)
+                "FROM checkins WHERE period_id=? AND status='scored' AND deleted_at IS NULL", (p["id"],)
             ).fetchone()
             items.append({
                 "id": p["id"], "seq": p["seq"],
@@ -266,7 +366,7 @@ def create_app() -> FastAPI:
                 "total": agg["total"], "n": agg["n"] or 0,
             })
         return templates.TemplateResponse(
-            "history.html", {"request": request, "items": items}
+            request, "history.html", {"request": request, "items": items}
         )
 
     @app.get("/history/{pid}", response_class=HTMLResponse)
@@ -287,7 +387,7 @@ def create_app() -> FastAPI:
             "period_total": scoring.period_total(rows),
             "feed": _build_feed(rows),
         }
-        return templates.TemplateResponse("history_detail.html", ctx)
+        return templates.TemplateResponse(request, "history_detail.html", ctx)
 
     @app.get("/archive", response_class=HTMLResponse)
     def archive_confirm(request: Request):
@@ -303,7 +403,7 @@ def create_app() -> FastAPI:
             "period_total": scoring.period_total(rows),
             "checkin_n": n,
         }
-        return templates.TemplateResponse("archive_confirm.html", ctx)
+        return templates.TemplateResponse(request, "archive_confirm.html", ctx)
 
     @app.post("/archive")
     def archive_do(request: Request):
@@ -324,7 +424,10 @@ def create_app() -> FastAPI:
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
         role, name = _author(request)
-        if body.strip():
+        target = conn.execute(
+            "SELECT 1 FROM checkins WHERE id=? AND deleted_at IS NULL", (cid,),
+        ).fetchone()
+        if body.strip() and target:
             conn.execute(
                 "INSERT INTO comments (checkin_id, author_name, author_role, body,"
                 " created_at) VALUES (?,?,?,?,?)",
@@ -338,6 +441,11 @@ def create_app() -> FastAPI:
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
         role, name = _author(request)
+        target = conn.execute(
+            "SELECT 1 FROM checkins WHERE id=? AND deleted_at IS NULL", (cid,),
+        ).fetchone()
+        if not target:
+            return RedirectResponse("/", status_code=303)
         conn.execute(
             "INSERT INTO reactions (checkin_id, author_name, kind, created_at)"
             " VALUES (?,?,?,?)",
@@ -351,10 +459,10 @@ def create_app() -> FastAPI:
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
         pend = conn.execute(
-            "SELECT * FROM checkins WHERE status='pending' ORDER BY id"
+            "SELECT * FROM checkins WHERE status='pending' AND deleted_at IS NULL ORDER BY id"
         ).fetchall()
         return templates.TemplateResponse(
-            "review.html", {"request": request, "pending": pend}
+            request, "review.html", {"request": request, "pending": pend}
         )
 
     @app.post("/review/{cid}")
@@ -367,10 +475,14 @@ def create_app() -> FastAPI:
         reviewer = auth.current_name(request) or "监管者"
         now = _now().isoformat(timespec="seconds")
         if action == "approve":
+            try:
+                awarded = int(points or 0)
+            except ValueError:
+                return RedirectResponse("/review", status_code=303)
             conn.execute(
                 "UPDATE checkins SET status='scored', awarded_points=?, "
                 "reviewed_by=?, reviewed_at=? WHERE id=?",
-                (int(points or 0), reviewer, now, cid),
+                (awarded, reviewer, now, cid),
             )
         else:
             conn.execute(
@@ -379,6 +491,10 @@ def create_app() -> FastAPI:
                 (reviewer, now, cid),
             )
         conn.commit()
+        if action == "approve":
+            row = conn.execute("SELECT title FROM checkins WHERE id=?", (cid,)).fetchone()
+            _sync_points(awarded, "earn", row["title"] or "清单外打卡",
+                         "checkin", cid, reviewer, _now())
         return RedirectResponse("/review", status_code=303)
 
     @app.post("/adjust")
@@ -388,13 +504,19 @@ def create_app() -> FastAPI:
         reviewer = auth.current_name(request) or "监管者"
         now = _now().isoformat(timespec="seconds")
         pid = dbmod.ensure_open_period(conn, now)
-        conn.execute(
+        try:
+            delta = int(points)
+        except ValueError:
+            return RedirectResponse("/review", status_code=303)
+        cid = conn.execute(
             "INSERT INTO checkins (kind, period_id, title, note, awarded_points,"
             " status, created_at, reviewed_by, reviewed_at) VALUES "
             "('adjustment',?,?,?,?, 'scored', ?, ?, ?)",
-            (pid, "分值调整", reason, int(points), now, reviewer, now),
-        )
+            (pid, "分值调整", reason, delta, now, reviewer, now),
+        ).lastrowid
         conn.commit()
+        _sync_points(delta, "adjustment", reason.strip() or "管理者积分调整",
+                     "checkin", cid, reviewer, _now())
         return RedirectResponse("/", status_code=303)
 
     @app.get("/admin/catalog", response_class=HTMLResponse)
@@ -405,7 +527,7 @@ def create_app() -> FastAPI:
             "SELECT * FROM task_catalog ORDER BY sort_order, id"
         ).fetchall()
         return templates.TemplateResponse(
-            "catalog_admin.html", {"request": request, "tasks": tasks}
+            request, "catalog_admin.html", {"request": request, "tasks": tasks}
         )
 
     @app.post("/admin/catalog")
@@ -442,7 +564,7 @@ def create_app() -> FastAPI:
             "SELECT body FROM announcements WHERE active=1 ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return templates.TemplateResponse(
-            "announcement.html",
+            request, "announcement.html",
             {
                 "request": request,
                 "current": cur["body"] if cur else "",
@@ -465,6 +587,501 @@ def create_app() -> FastAPI:
         )
         conn.commit()
         return RedirectResponse("/", status_code=303)
+
+    @app.get("/points", response_class=HTMLResponse)
+    def points_page(request: Request, kind: str = ""):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        stage, window = lifecycle.ensure_state(conn, _now())
+        if kind:
+            rows = conn.execute(
+            "SELECT * FROM point_ledger WHERE entry_type=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 200",
+                (kind,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM point_ledger WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200"
+            ).fetchall()
+        return templates.TemplateResponse(request, "points.html", {
+            "request": request, "rows": rows,
+            "summary": lifecycle.point_summary(conn, stage, window), "kind": kind,
+        })
+
+    def _expire_missions(now_iso):
+        conn.execute(
+            "UPDATE missions SET status='expired' WHERE status='open' "
+            "AND deadline_at IS NOT NULL AND deadline_at!='' AND deadline_at<?",
+            (now_iso,),
+        )
+        conn.commit()
+
+    @app.get("/missions", response_class=HTMLResponse)
+    def missions_page(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        _expire_missions(_now().isoformat(timespec="seconds"))
+        rows = conn.execute(
+            "SELECT * FROM missions WHERE deleted_at IS NULL ORDER BY "
+            "CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 WHEN 'submitted' THEN 2 ELSE 3 END, "
+            "id DESC LIMIT 100"
+        ).fetchall()
+        return templates.TemplateResponse(request, "missions.html", {
+            "request": request, "missions": rows, "role": auth.current_role(request)
+        })
+
+    @app.post("/missions/{mid}/claim")
+    def mission_claim(request: Request, mid: int):
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/login", status_code=303)
+        now = _now().isoformat(timespec="seconds")
+        _expire_missions(now)
+        conn.execute(
+            "UPDATE missions SET status='claimed', claimed_at=? WHERE id=? AND status='open'",
+            (now, mid),
+        )
+        conn.commit()
+        return RedirectResponse("/missions", status_code=303)
+
+    @app.post("/missions/{mid}/submit")
+    async def mission_submit(
+        request: Request, mid: int, note: str = Form(""),
+        photo_camera: UploadFile = File(None), photo_album: UploadFile = File(None),
+        photo: UploadFile = File(None),
+    ):
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/login", status_code=303)
+        mission = conn.execute(
+            "SELECT * FROM missions WHERE id=? AND status='claimed' AND deleted_at IS NULL", (mid,)
+        ).fetchone()
+        if mission is None:
+            return RedirectResponse("/missions", status_code=303)
+        try:
+            photo_path = await _save_photo_choice(photo_camera, photo_album, photo)
+        except PhotoError:
+            return RedirectResponse("/missions?error=照片格式不支持或文件过大", status_code=303)
+        if mission["photo_required"] and not photo_path:
+            return RedirectResponse("/missions?error=这个任务需要完成照片", status_code=303)
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE missions SET status='submitted', submitted_at=?, submission_note=?, "
+            "photo_path=?, rejection_reason=NULL WHERE id=? AND status='claimed'",
+            (now, note.strip(), photo_path, mid),
+        )
+        conn.execute(
+            "INSERT INTO mission_submissions (mission_id,note,photo_path,submitted_at) "
+            "VALUES (?,?,?,?)", (mid, note.strip(), photo_path, now),
+        )
+        conn.commit()
+        return RedirectResponse("/missions", status_code=303)
+
+    @app.get("/admin/missions", response_class=HTMLResponse)
+    def admin_missions(request: Request, error: str = ""):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        rows = conn.execute(
+            "SELECT * FROM missions WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+        return templates.TemplateResponse(request, "missions_admin.html", {
+            "request": request, "missions": rows, "error": error,
+        })
+
+    @app.post("/admin/missions")
+    def admin_mission_create(
+        request: Request, title: str = Form(...), description: str = Form(""),
+        points: str = Form(...), deadline_at: str = Form(""),
+        photo_required: str = Form("0"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            value = int(points)
+        except ValueError:
+            return RedirectResponse("/admin/missions?error=积分必须是整数", status_code=303)
+        if not title.strip() or value < 0:
+            return RedirectResponse("/admin/missions?error=请填写有效任务和积分", status_code=303)
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO missions "
+            "(title,description,points,deadline_at,photo_required,published_by,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (title.strip(), description.strip(), value,
+             deadline_at if deadline_at else None,
+             1 if photo_required == "1" else 0,
+             auth.current_name(request) or "监管者", now),
+        )
+        conn.commit()
+        return RedirectResponse("/admin/missions", status_code=303)
+
+    @app.post("/admin/missions/{mid}/cancel")
+    def admin_mission_cancel(request: Request, mid: int):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        conn.execute(
+            "UPDATE missions SET status='cancelled' WHERE id=? AND status IN ('open','claimed')",
+            (mid,),
+        )
+        conn.commit()
+        return RedirectResponse("/admin/missions", status_code=303)
+
+    @app.post("/admin/missions/{mid}/edit")
+    def admin_mission_edit(
+        request: Request, mid: int, title: str = Form(...),
+        description: str = Form(""), points: str = Form(...),
+        deadline_at: str = Form(""), photo_required: str = Form("0"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            value = int(points)
+        except ValueError:
+            return RedirectResponse("/admin/missions?error=积分必须是整数", status_code=303)
+        if not title.strip() or value < 0:
+            return RedirectResponse("/admin/missions?error=任务内容不合法", status_code=303)
+        conn.execute(
+            "UPDATE missions SET title=?,description=?,points=?,deadline_at=?,photo_required=? "
+            "WHERE id=? AND status='open'",
+            (title.strip(), description.strip(), value, deadline_at or None,
+             1 if photo_required == "1" else 0, mid),
+        )
+        conn.commit()
+        return RedirectResponse("/admin/missions", status_code=303)
+
+    @app.post("/admin/missions/{mid}/review")
+    def admin_mission_review(
+        request: Request, mid: int, action: str = Form(...),
+        points: str = Form("0"), reason: str = Form(""),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        mission = conn.execute(
+            "SELECT * FROM missions WHERE id=? AND status='submitted' AND deleted_at IS NULL", (mid,)
+        ).fetchone()
+        if mission is None:
+            return RedirectResponse("/admin/missions", status_code=303)
+        reviewer = auth.current_name(request) or "监管者"
+        now_dt = _now()
+        now = now_dt.isoformat(timespec="seconds")
+        submission = conn.execute(
+            "SELECT id FROM mission_submissions WHERE mission_id=? ORDER BY id DESC LIMIT 1",
+            (mid,),
+        ).fetchone()
+        if action == "approve":
+            try:
+                awarded = int(points)
+            except ValueError:
+                return RedirectResponse("/admin/missions?error=积分必须是整数", status_code=303)
+            conn.execute(
+                "UPDATE missions SET status='completed', reviewed_at=?, reviewed_by=?, "
+                "awarded_points=?, rejection_reason=NULL WHERE id=? AND status='submitted'",
+                (now, reviewer, awarded, mid),
+            )
+            if submission:
+                conn.execute(
+                    "UPDATE mission_submissions SET reviewed_at=?,reviewer=?,decision='approved',points=? "
+                    "WHERE id=?", (now, reviewer, awarded, submission["id"]),
+                )
+            conn.commit()
+            _sync_points(awarded, "earn", mission["title"], "mission", mid,
+                         reviewer, now_dt)
+        else:
+            conn.execute(
+                "UPDATE missions SET status='claimed', reviewed_at=?, reviewed_by=?, "
+                "rejection_reason=? WHERE id=? AND status='submitted'",
+                (now, reviewer, reason.strip() or "请补充后重新提交", mid),
+            )
+            if submission:
+                conn.execute(
+                    "UPDATE mission_submissions SET reviewed_at=?,reviewer=?,decision='rejected',reason=? "
+                    "WHERE id=?", (now, reviewer, reason.strip(), submission["id"]),
+                )
+            conn.commit()
+        return RedirectResponse("/admin/missions", status_code=303)
+
+    @app.get("/admin/stages", response_class=HTMLResponse)
+    def stages_page(request: Request, error: str = ""):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        rows = conn.execute("SELECT * FROM stages ORDER BY starts_on DESC, id DESC").fetchall()
+        return templates.TemplateResponse(request, "stages_admin.html", {
+            "request": request, "stages": rows, "error": error,
+            "switches": conn.execute(
+                "SELECT x.*,o.name AS old_name,n.name AS new_name FROM stage_switches x "
+                "LEFT JOIN stages o ON o.id=x.old_stage_id JOIN stages n ON n.id=x.new_stage_id "
+                "ORDER BY x.id DESC LIMIT 20"
+            ).fetchall(),
+        })
+
+    @app.post("/admin/stages")
+    def stages_edit(
+        request: Request, op: str = Form("add"), stage_id: str = Form(""),
+        name: str = Form(""), starts_on: str = Form(""), ends_on: str = Form(""),
+        mode: str = Form("daily"), cutoff_hour: str = Form("4"),
+        window_start_weekday: str = Form("4"), window_end_weekday: str = Form("0"),
+        points_goal: str = Form("30"), basic_minutes: str = Form("120"),
+        reward_minutes: str = Form("120"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            cutoff = int(cutoff_hour)
+            start_wd = int(window_start_weekday) if mode == "weekly" else 4
+            end_wd = int(window_end_weekday) if mode == "weekly" else 0
+            goal_value, base_value, reward_value = map(
+                int, (points_goal, basic_minutes, reward_minutes),
+            )
+            dt.date.fromisoformat(starts_on)
+            dt.date.fromisoformat(ends_on)
+        except (ValueError, TypeError):
+            return RedirectResponse("/admin/stages?error=日期和数字格式不正确", status_code=303)
+        if (not name.strip() or starts_on > ends_on or mode not in ("daily", "weekly")
+                or not 0 <= cutoff <= 23 or not 0 <= start_wd <= 6 or not 0 <= end_wd <= 6
+                or min(goal_value, base_value, reward_value) < 0):
+            return RedirectResponse("/admin/stages?error=阶段规则不合法", status_code=303)
+        payload = (name.strip(), starts_on, ends_on, mode, cutoff, start_wd,
+                   end_wd, goal_value, base_value, reward_value)
+        if op == "update" and stage_id:
+            conn.execute(
+                "UPDATE stages SET name=?,starts_on=?,ends_on=?,mode=?,cutoff_hour=?,"
+                "window_start_weekday=?,window_end_weekday=?,points_goal=?,basic_minutes=?,"
+                "reward_minutes=? WHERE id=?",
+                payload + (stage_id,),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO stages (name,starts_on,ends_on,mode,cutoff_hour,"
+                "window_start_weekday,window_end_weekday,points_goal,basic_minutes,"
+                "reward_minutes,active,created_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)",
+                payload + (_now().isoformat(timespec="seconds"),
+                           auth.current_name(request) or "监管者"),
+            )
+        conn.commit()
+        return RedirectResponse("/admin/stages", status_code=303)
+
+    @app.post("/admin/stages/{stage_id}/switch")
+    def stage_switch(request: Request, stage_id: int):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        target = conn.execute("SELECT * FROM stages WHERE id=?", (stage_id,)).fetchone()
+        if not target:
+            return RedirectResponse("/admin/stages?error=阶段不存在", status_code=303)
+        now = _now()
+        target_day = lifecycle.logical_date(now, int(target["cutoff_hour"])).isoformat()
+        if not (target["starts_on"] <= target_day <= target["ends_on"]):
+            return RedirectResponse(
+                "/admin/stages?error=当前日期不在该阶段的生效日期内", status_code=303,
+            )
+        actor = auth.current_name(request) or "监管者"
+        now_iso = now.isoformat(timespec="seconds")
+        old = conn.execute("SELECT * FROM stages WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
+        if old and old["id"] == stage_id:
+            return RedirectResponse("/admin/stages", status_code=303)
+        if old:
+            lifecycle.settle_open_stage(conn, old["id"], now)
+        old_day = lifecycle.logical_date(now, int(old["cutoff_hour"]) if old else 4).isoformat()
+        conn.execute(
+            "UPDATE time_grants SET deleted_at=?,deleted_by=?,delete_reason='阶段切换，旧基础额度作废' "
+            "WHERE source_type='stage_base' AND logical_date=? AND deleted_at IS NULL",
+            (now_iso, actor, old_day),
+        )
+        conn.execute("UPDATE stages SET active=0")
+        conn.execute("UPDATE stages SET active=1,activated_at=? WHERE id=?", (now_iso, stage_id))
+        conn.execute(
+            "INSERT INTO stage_switches (old_stage_id,new_stage_id,switched_by,switched_at) "
+            "VALUES (?,?,?,?)", (old["id"] if old else None, stage_id, actor, now_iso),
+        )
+        conn.commit()
+        lifecycle.ensure_state(conn, now)
+        return RedirectResponse("/admin/stages", status_code=303)
+
+    @app.get("/computer/history", response_class=HTMLResponse)
+    def computer_history(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        stage, _ = lifecycle.ensure_state(conn, _now())
+        cutoff = int(stage["cutoff_hour"]) if stage else 4
+        return templates.TemplateResponse(request, "computer_history.html", {
+            "request": request,
+            "summary": lifecycle.computer_summary(conn, _now(), cutoff),
+            "sessions": conn.execute(
+                "SELECT * FROM computer_sessions WHERE deleted_at IS NULL ORDER BY start_at DESC LIMIT 200"
+            ).fetchall(),
+        })
+
+    def _session_overlaps(start_at, end_at, exclude_id=None):
+        sql = ("SELECT id FROM computer_sessions WHERE start_at < ? "
+               "AND COALESCE(end_at,'9999-12-31T23:59:59') > ? AND deleted_at IS NULL")
+        args = [end_at or "9999-12-31T23:59:59", start_at]
+        if exclude_id is not None:
+            sql += " AND id!=?"
+            args.append(exclude_id)
+        return conn.execute(sql, args).fetchone() is not None
+
+    @app.get("/admin/computer", response_class=HTMLResponse)
+    def admin_computer(request: Request, error: str = ""):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        stage, _ = lifecycle.ensure_state(conn, _now())
+        cutoff = int(stage["cutoff_hour"]) if stage else 4
+        return templates.TemplateResponse(request, "computer_admin.html", {
+            "request": request, "error": error,
+            "summary": lifecycle.computer_summary(conn, _now(), cutoff),
+            "sessions": conn.execute(
+                "SELECT * FROM computer_sessions WHERE deleted_at IS NULL ORDER BY start_at DESC LIMIT 100"
+            ).fetchall(),
+            "audits": conn.execute(
+                "SELECT * FROM computer_session_audits ORDER BY id DESC LIMIT 50"
+            ).fetchall(),
+        })
+
+    @app.post("/admin/computer/grant")
+    def computer_grant(
+        request: Request, logical_date: str = Form(...), minutes: str = Form(...),
+        reason: str = Form(...),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            dt.date.fromisoformat(logical_date)
+            value = int(minutes)
+        except ValueError:
+            return RedirectResponse("/admin/computer?error=日期或分钟格式错误", status_code=303)
+        if not reason.strip() or value == 0:
+            return RedirectResponse("/admin/computer?error=调整分钟和原因不能为空", status_code=303)
+        now = _now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO time_grants (logical_date,minutes,grant_type,description,"
+            "source_type,source_id,actor_name,created_at) VALUES (?,?, 'adjustment',?,?,?,?,?)",
+            (logical_date, value, reason.strip(), "manual_time", uuid.uuid4().hex,
+             auth.current_name(request) or "监管者", now),
+        )
+        conn.commit()
+        return RedirectResponse("/admin/computer", status_code=303)
+
+    @app.post("/admin/computer/session")
+    def computer_session_edit(
+        request: Request, session_id: str = Form(""), start_at: str = Form(...),
+        end_at: str = Form(""), reason: str = Form(...),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        start = start_at
+        end = end_at if end_at else None
+        try:
+            start_dt = dt.datetime.fromisoformat(start)
+            end_dt = dt.datetime.fromisoformat(end) if end else None
+        except ValueError:
+            return RedirectResponse("/admin/computer?error=时间格式错误", status_code=303)
+        if not reason.strip() or (end_dt and end_dt <= start_dt):
+            return RedirectResponse("/admin/computer?error=请填写原因并检查起止时间", status_code=303)
+        sid = int(session_id) if session_id else None
+        if _session_overlaps(start, end, sid):
+            return RedirectResponse("/admin/computer?error=该时段与已有记录重叠", status_code=303)
+        actor = auth.current_name(request) or "监管者"
+        now = _now().isoformat(timespec="seconds")
+        if sid:
+            before = conn.execute("SELECT * FROM computer_sessions WHERE id=?", (sid,)).fetchone()
+            if before is None:
+                return RedirectResponse("/admin/computer", status_code=303)
+            conn.execute(
+                "UPDATE computer_sessions SET start_at=?,end_at=?,ended_by=?,note=?,updated_at=? "
+                "WHERE id=?", (start, end, actor, reason.strip(), now, sid),
+            )
+            action = "correct"
+            before_start, before_end = before["start_at"], before["end_at"]
+        else:
+            sid = conn.execute(
+                "INSERT INTO computer_sessions (start_at,end_at,started_by,ended_by,note,source,updated_at) "
+                "VALUES (?,?,?,?,?,'manual',?)",
+                (start, end, actor, actor if end else None, reason.strip(), now),
+            ).lastrowid
+            action, before_start, before_end = "create", None, None
+        conn.execute(
+            "INSERT INTO computer_session_audits "
+            "(session_id,action,before_start,before_end,after_start,after_end,actor_name,reason,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (sid, action, before_start, before_end, start, end, actor, reason.strip(), now),
+        )
+        conn.commit()
+        return RedirectResponse("/admin/computer", status_code=303)
+
+    @app.post("/admin/computer/force-off")
+    def computer_force_off(request: Request, reason: str = Form(...)):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        row = conn.execute(
+            "SELECT * FROM computer_sessions WHERE end_at IS NULL AND deleted_at IS NULL "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row and reason.strip():
+            actor = auth.current_name(request) or "监管者"
+            now = _now().isoformat(timespec="seconds")
+            conn.execute(
+                "UPDATE computer_sessions SET end_at=?,ended_by=?,note=?,updated_at=? WHERE id=?",
+                (now, actor, reason.strip(), now, row["id"]),
+            )
+            conn.execute(
+                "INSERT INTO computer_session_audits "
+                "(session_id,action,before_start,before_end,after_start,after_end,actor_name,reason,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (row["id"], "force_off", row["start_at"], None,
+                 row["start_at"], now, actor, reason.strip(), now),
+            )
+            conn.commit()
+        return RedirectResponse("/admin/computer", status_code=303)
+
+    @app.get("/admin/trash", response_class=HTMLResponse)
+    def trash_page(request: Request, error: str = ""):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        rows = conn.execute(
+            "SELECT * FROM record_deletions WHERE restored_at IS NULL AND purged_at IS NULL "
+            "ORDER BY id DESC"
+        ).fetchall()
+        history = conn.execute(
+            "SELECT * FROM record_deletions WHERE restored_at IS NOT NULL OR purged_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 100"
+        ).fetchall()
+        return templates.TemplateResponse(request, "trash.html", {
+            "request": request, "rows": rows, "history": history, "error": error,
+            "now_iso": _now().isoformat(timespec="seconds"),
+        })
+
+    @app.post("/admin/records/{entity_type}/{record_id}/trash")
+    def trash_record_route(
+        request: Request, entity_type: str, record_id: int, reason: str = Form(...),
+        return_to: str = Form("/admin/trash"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        if entity_type == "ledger":
+            ledger = conn.execute(
+                "SELECT * FROM point_ledger WHERE id=? AND deleted_at IS NULL", (record_id,),
+            ).fetchone()
+            if not ledger or ledger["source_type"] not in ("checkin", "legacy_checkin", "mission"):
+                return RedirectResponse("/admin/trash?error=系统流水不能单独删除", status_code=303)
+            entity_type = "mission" if ledger["source_type"] == "mission" else "checkin"
+            record_id = int(ledger["source_id"])
+        try:
+            records.trash_record(
+                conn, entity_type, record_id, auth.current_name(request) or "监管者",
+                reason, _now(),
+            )
+        except ValueError as exc:
+            return RedirectResponse(f"/admin/trash?error={exc}", status_code=303)
+        safe_return = return_to if return_to.startswith("/") and not return_to.startswith("//") else "/admin/trash"
+        return RedirectResponse(safe_return, status_code=303)
+
+    @app.post("/admin/trash/{deletion_id}/restore")
+    def trash_restore(request: Request, deletion_id: int):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            records.restore_record(
+                conn, deletion_id, auth.current_name(request) or "监管者", _now(),
+            )
+        except ValueError as exc:
+            return RedirectResponse(f"/admin/trash?error={exc}", status_code=303)
+        return RedirectResponse("/admin/trash", status_code=303)
 
     return app
 

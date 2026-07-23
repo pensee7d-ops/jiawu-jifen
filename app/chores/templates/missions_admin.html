@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}任务管理 · 家务勇者村{% endblock %}
+{% block content %}
+<span class="eyebrow">QUEST CONTROL</span><h1>发布与审核任务</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<form method="post" action="/admin/missions" class="pixel-card form-card">
+  <h2>发布新任务</h2>
+  <label>任务标题<input name="title" required maxlength="80" placeholder="例如：整理书桌"></label>
+  <label>详细说明<textarea name="description" rows="3" placeholder="完成标准、注意事项"></textarea></label>
+  <div class="form-grid"><label>奖励积分<input type="number" name="points" min="0" required></label>
+  <label>截止时间<input type="datetime-local" name="deadline_at"></label></div>
+  <label class="check-label"><input type="checkbox" name="photo_required" value="1" checked> 必须上传完成照片</label>
+  <button class="btn green">发布任务</button>
+</form>
+<h2>任务队列</h2>
+{% for m in missions %}<article class="pixel-card quest-card">
+  <div class="quest-header"><div><b>{{ m['title'] }}</b><small>{{ m['status'] }} · {{ m['published_by'] }}</small></div><b class="xp">{{ m['points'] }} XP</b></div>
+  {% if m['submission_note'] %}<p>{{ m['submission_note'] }}</p>{% endif %}
+  {% if m['photo_path'] %}<img class="photo" src="{{ m['photo_path'] }}" alt="完成照片">{% endif %}
+  {% if m['status']=='submitted' %}<form method="post" action="/admin/missions/{{ m['id'] }}/review">
+    <label>最终积分<input type="number" name="points" value="{{ m['points'] }}"></label>
+    <label>驳回原因<input name="reason" placeholder="驳回时填写"></label>
+    <div class="button-row"><button class="btn green" name="action" value="approve">通过并计分</button><button class="btn red" name="action" value="reject">驳回重做</button></div>
+  </form>{% endif %}
+  {% if m['status']=='open' %}<details><summary>编辑任务</summary><form method="post" action="/admin/missions/{{ m['id'] }}/edit">
+    <label>标题<input name="title" value="{{ m['title'] }}" required></label>
+    <label>说明<textarea name="description">{{ m['description'] or '' }}</textarea></label>
+    <div class="form-grid"><label>积分<input type="number" name="points" value="{{ m['points'] }}" min="0"></label><label>截止时间<input type="datetime-local" name="deadline_at" value="{{ m['deadline_at'][:16] if m['deadline_at'] else '' }}"></label></div>
+    <label class="check-label"><input type="checkbox" name="photo_required" value="1" {{ 'checked' if m['photo_required'] }}> 需要照片</label><button class="btn small">保存修改</button>
+  </form></details>{% endif %}
+  {% if m['status'] in ['open','claimed'] %}<form method="post" action="/admin/missions/{{ m['id'] }}/cancel"><button class="btn ghost small" data-confirm="确定取消这个任务吗？">取消任务</button></form>{% endif %}
+  {% if m['status']=='completed' %}<details class="danger-zone"><summary>删除已完成任务</summary><form method="post" action="/admin/records/mission/{{ m['id'] }}/trash" class="inline-form"><input type="hidden" name="return_to" value="/admin/missions"><input name="reason" required placeholder="删除原因"><button class="btn red small" data-confirm="任务和关联积分将移入回收站，确定继续？">移入回收站</button></form></details>{% endif %}
+</article>{% else %}<div class="empty-state">!<p>还没有发布任务</p></div>{% endfor %}
+{% endblock %}

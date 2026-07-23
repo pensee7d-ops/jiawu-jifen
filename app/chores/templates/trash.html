@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}回收站 · 家务勇者村{% endblock %}
+{% block content %}
+<span class="eyebrow">RECYCLE BIN</span><h1>管理者回收站</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<div class="notice warning">记录保留 7 天。到期后照片和正文会清除，只留下最小审计信息，无法恢复。</div>
+{% for row in rows %}<article class="pixel-card trash-row"><div><span class="status-badge">{{ row['entity_type'] }}</span><h2>{{ row['display_text'] }}</h2><p class="muted">{{ row['deleted_by'] }} 于 {{ row['deleted_at'][:16].replace('T',' ') }} 删除 · 原因：{{ row['reason'] }}</p><small>可恢复至 {{ row['purge_after'][:16].replace('T',' ') }}</small></div>{% if row['purge_after'] > now_iso %}<form method="post" action="/admin/trash/{{ row['id'] }}/restore"><button class="btn green">恢复记录</button></form>{% else %}<span class="status-badge">等待清理</span>{% endif %}</article>
+{% else %}<div class="empty-state">♲<p>回收站是空的</p></div>{% endfor %}
+{% if history %}<details class="audit-history"><summary>查看已恢复 / 已清理审计</summary>{% for row in history %}<div class="ledger-row"><div><b>{{ row['display_text'] }}</b><small>{{ '已清理' if row['purged_at'] else '已恢复' }} · {{ row['reason'] }}</small></div></div>{% endfor %}</details>{% endif %}
+{% endblock %}

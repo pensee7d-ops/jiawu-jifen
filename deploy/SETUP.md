@@ -87,3 +87,49 @@ free -m                                        # 仍有富余（实测可用 ~57
   `chores-*.db` 与 `photos-*.tar.gz` 还原到 `app/data/`，`systemctl start chores`。
 - 内存吃紧：`chores.service` 的 `MemoryMax=180M` 是兜底；若上传大图 OOM 频繁重启，
   调高到 220–256M（实测总内存仍留 >350M 给 Xray/系统）或加 swap。
+
+## 从 1.x 升级到 2.0
+
+升级会增加积分、阶段、时长和悬赏任务表，并扩展电脑记录表。迁移由应用启动时
+自动、幂等执行，但上线前仍必须备份数据库和照片：
+
+```bash
+/opt/chores/backup.sh
+systemctl stop chores
+cd /opt/chores/jiawu-jifen
+sudo -u chores git pull --ff-only
+sudo -u chores app/.venv/bin/pip install -q -r app/requirements.txt
+systemctl start chores
+journalctl -u chores -n 60 --no-pager
+curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/login
+```
+
+`pillow-heif` 用于读取 iPhone 相册中的 HEIC/HEIF 照片，随 requirements 一起安装，
+不需要额外启动常驻服务。首次登录后按以下顺序验收：
+
+1. 监管者进入「阶段规则」，创建当前阶段并确认基础分钟、目标分和奖励分钟。
+2. 打开「积分账本」，核对期初余额只包含升级前的当前开放周期。
+3. 用手机分别测试相册选择和现场拍照。
+4. 补一段测试电脑记录，确认时长和审计记录正确后再正式使用。
+
+如果启动迁移失败：停止服务，恢复刚才生成的 `chores-*.db`，切回上一代码版本后
+重新启动。照片迁移不会改写原文件。
+
+## 从 2.0 升级到 2.1
+
+2.1 会为打卡、任务、积分流水、电脑会话和时长流水增加软删除字段，并新增
+`record_deletions` 与 `stage_switches`。迁移仍由应用启动自动执行，重复启动安全。
+上线前除了日常数据库与照片备份，还应保存当前代码：
+
+```bash
+/opt/chores/backup.sh
+tar -czf /opt/chores/backups/code-pre-v2.1-$(date +%F-%H%M).tar.gz \
+  -C /opt/chores/jiawu-jifen app/chores app/requirements.txt deploy
+```
+
+启动后依次检查：管理者底栏不再出现打卡、阶段新建区默认收起、每日模式不显示星期
+字段、动态日期可以前后翻阅、回收站可删除并恢复一条测试记录。回收站记录保留 7 天，
+应用会在启动和请求时清理过期照片与正文；最小删除审计不会被清除。
+
+假期流程固定为人工切换：提前建立未启用的每日假期阶段，放假时切换过去，结束后
+切回原学期星期阶段。不要缩短或拆分原学期日期，也不要同时启用多个阶段。

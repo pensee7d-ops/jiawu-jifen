@@ -1,22 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>打卡</h1>
-<form method="post" action="/checkin" enctype="multipart/form-data">
-  <p><b>选固定项</b></p>
+<span class="eyebrow">NEW ADVENTURE LOG</span><h1>完成打卡</h1>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<form method="post" action="/checkin" enctype="multipart/form-data" class="pixel-card form-card">
+  <h2>选择记录类型</h2>
   <label><input type="radio" name="kind" value="fixed" checked> 固定任务</label>
   <select name="task_id">
     {% for t in tasks %}
       <option value="{{ t['id'] }}">{{ t['name'] }}（{{ t['default_points'] }}分）</option>
     {% endfor %}
   </select>
-  <p><b>或自由报（待监管者审）</b></p>
   <label><input type="radio" name="kind" value="adhoc"> 清单外</label>
   <input type="text" name="title" placeholder="做了啥">
   <input type="number" name="proposed_points" placeholder="建议分">
-  <label>照片<input type="file" name="photo" accept="image/*" capture="environment"></label>
+  <fieldset class="photo-picker"><legend>完成照片（可选）</legend><div class="photo-actions">
+    <label class="btn ghost file-button">📷 现场拍照<input class="photo-input" data-photo-group="checkin" data-preview="checkin-preview" type="file" name="photo_camera" accept="image/*" capture="environment"></label>
+    <label class="btn ghost file-button">▧ 从相册选择<input class="photo-input" data-photo-group="checkin" data-preview="checkin-preview" type="file" name="photo_album" accept="image/*"></label>
+  </div></fieldset>
+  <img id="checkin-preview" class="photo preview" alt="照片预览" hidden>
+  <button type="button" class="btn ghost small" data-clear-group="checkin" hidden>移除照片</button>
   <label>心情<input type="text" name="mood" placeholder="😀 一句话"></label>
   <textarea name="note" placeholder="备注"></textarea>
-  <button type="submit">提交打卡</button>
+  <button type="submit" class="btn green wide">保存冒险记录</button>
 </form>
 <p><a href="/">← 回看板</a></p>
 {% endblock %}

@@ -1,4 +1,3 @@
-import sqlite3
 from chores.db import (
     connect, init_schema, migrate, seed_defaults,
     current_period, ensure_open_period, archive_period,
@@ -67,6 +66,24 @@ def test_migrate_adds_period_id_to_legacy_checkins(tmp_path):
     cols = {r["name"] for r in conn.execute(
         "PRAGMA table_info(checkins)").fetchall()}
     assert "period_id" in cols
+
+
+def test_v2_current_period_migration_is_idempotent(tmp_path):
+    conn = connect(str(tmp_path / "v2.db"))
+    init_schema(conn)
+    seed_defaults(conn)
+    pid = ensure_open_period(conn, "2026-07-01T04:00:00")
+    conn.execute(
+        "INSERT INTO checkins (kind,task_id,period_id,awarded_points,status,created_at) "
+        "VALUES ('fixed',1,?,10,'scored','2026-07-01T10:00:00')", (pid,)
+    )
+    conn.commit()
+    migrate(conn)
+    migrate(conn)
+    rows = conn.execute(
+        "SELECT * FROM point_ledger WHERE source_type='legacy_checkin'"
+    ).fetchall()
+    assert len(rows) == 1 and rows[0]["delta"] == 10
 
 
 def test_ensure_open_period_creates_one_and_backfills(tmp_path):
