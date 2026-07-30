@@ -50,6 +50,8 @@ def create_app() -> FastAPI:
         now = _now()
         records.purge_expired(conn, cfg.photo_dir, now)
         lifecycle.ensure_state(conn, now)
+        _expire_exchange_requests(now)
+        _expire_missions(now.isoformat(timespec="seconds"))
         return await call_next(request)
 
     def _goal() -> int:
@@ -75,6 +77,43 @@ def create_app() -> FastAPI:
         )
         conn.commit()
         lifecycle.ensure_state(conn, now)
+
+    def _expire_exchange_requests(now: dt.datetime):
+        active = lifecycle.active_stage(conn, now)
+        changed = False
+        for row in conn.execute(
+            "SELECT r.id,r.logical_date,r.stage_id,s.cutoff_hour "
+            "FROM time_exchange_requests r JOIN stages s ON s.id=r.stage_id "
+            "WHERE r.status='pending'"
+        ).fetchall():
+            current_day = lifecycle.logical_date(now, int(row["cutoff_hour"])).isoformat()
+            if current_day != row["logical_date"] or not active or active["id"] != row["stage_id"]:
+                conn.execute(
+                    "UPDATE time_exchange_requests SET status='expired',reviewed_at=?,"
+                    "review_reason='逻辑日或阶段已经结束' WHERE id=? AND status='pending'",
+                    (now.isoformat(timespec="seconds"), row["id"]),
+                )
+                changed = True
+        if changed:
+            conn.commit()
+
+    def _pending_summary():
+        checkins = conn.execute(
+            "SELECT COUNT(*) AS n FROM checkins WHERE status='pending' AND deleted_at IS NULL"
+        ).fetchone()["n"]
+        missions = conn.execute(
+            "SELECT COUNT(*) AS n FROM missions WHERE status='submitted' AND deleted_at IS NULL"
+        ).fetchone()["n"]
+        exchanges = conn.execute(
+            "SELECT COUNT(*) AS n FROM time_exchange_requests WHERE status='pending'"
+        ).fetchone()["n"]
+        return {
+            "checkin": int(checkins), "mission": int(missions),
+            "time_exchange": int(exchanges),
+            "total": int(checkins) + int(missions) + int(exchanges),
+        }
+
+    templates.env.globals["pending_counts"] = _pending_summary
 
     async def _save_upload(photo):
         if photo is None:
@@ -227,10 +266,10 @@ def create_app() -> FastAPI:
                 ("adhoc", pid, title, photo_path, note, mood, prop, now),
             )
             conn.commit()
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/activity", status_code=303)
 
     @app.post("/computer/on")
-    def computer_on(request: Request):
+    def computer_on(request: Request, return_to: str = Form("/computer")):
         if auth.current_role(request) != auth.ROLE_CHECKIN:
             return RedirectResponse("/login", status_code=303)
         open_row = conn.execute(
@@ -245,10 +284,10 @@ def create_app() -> FastAPI:
                  _now().isoformat(timespec="seconds")),
             )
             conn.commit()
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/" if return_to == "/" else "/computer", status_code=303)
 
     @app.post("/computer/off")
-    def computer_off(request: Request):
+    def computer_off(request: Request, return_to: str = Form("/computer")):
         if auth.current_role(request) != auth.ROLE_CHECKIN:
             return RedirectResponse("/login", status_code=303)
         open_row = conn.execute(
@@ -263,10 +302,10 @@ def create_app() -> FastAPI:
                  _now().isoformat(timespec="seconds"), open_row["id"]),
             )
             conn.commit()
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/" if return_to == "/" else "/computer", status_code=303)
 
     @app.get("/", response_class=HTMLResponse)
-    def dashboard(request: Request, feed_date: str = ""):
+    def dashboard(request: Request):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
         now = _now()
@@ -289,29 +328,17 @@ def create_app() -> FastAPI:
             (now.isoformat(timespec="seconds"),),
         )
         conn.commit()
-        logical_today = lifecycle.logical_date(now, 4)
-        earliest = conn.execute(
-            "SELECT MIN(created_at) AS first_at FROM checkins WHERE deleted_at IS NULL "
-            "AND kind!='adjustment'"
-        ).fetchone()["first_at"]
-        earliest_date = lifecycle.logical_date(dt.datetime.fromisoformat(earliest), 4) if earliest else logical_today
-        min_feed_date = dt.date.fromisoformat(stage["starts_on"]) if stage else earliest_date
-        max_feed_date = min(
-            logical_today, dt.date.fromisoformat(stage["ends_on"]) if stage else logical_today,
-        )
-        try:
-            selected_date = dt.date.fromisoformat(feed_date) if feed_date else logical_today
-        except ValueError:
-            selected_date = logical_today
-        selected_date = min(max(selected_date, min_feed_date), max_feed_date)
-        feed_start = dt.datetime.combine(selected_date, dt.time(hour=4))
-        feed_end = feed_start + dt.timedelta(days=1)
-        feed_rows = [dict(r) for r in conn.execute(
-            "SELECT c.*,t.name AS task_name FROM checkins c LEFT JOIN task_catalog t ON t.id=c.task_id "
-            "WHERE c.deleted_at IS NULL AND c.created_at>=? AND c.created_at<? ORDER BY c.created_at DESC",
-            (feed_start.isoformat(timespec="seconds"), feed_end.isoformat(timespec="seconds")),
+        logical_today = lifecycle.logical_date(now, cutoff)
+        day_start = dt.datetime.combine(logical_today, dt.time(hour=cutoff))
+        day_end = day_start + dt.timedelta(days=1)
+        today_checkins = conn.execute(
+            "SELECT COUNT(*) AS n FROM checkins WHERE deleted_at IS NULL AND kind!='adjustment' "
+            "AND created_at>=? AND created_at<?", (day_start.isoformat(), day_end.isoformat()),
+        ).fetchone()["n"]
+        active_missions = [dict(r) for r in conn.execute(
+            "SELECT * FROM missions WHERE deleted_at IS NULL AND status IN ('open','claimed','submitted') "
+            "ORDER BY CASE status WHEN 'submitted' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END,id DESC LIMIT 3"
         ).fetchall()]
-        feed = _build_feed(feed_rows)
         total = scoring.period_total(rows)
         goal = _goal()
         ctx = {
@@ -331,20 +358,130 @@ def create_app() -> FastAPI:
             "stage": dict(stage) if stage else None,
             "window": dict(window) if window else None,
             "announcement": ann["body"] if ann else "",
-            "feed": feed,
-            "feed_date": selected_date.isoformat(),
-            "feed_today": logical_today.isoformat(),
-            "feed_min": min_feed_date.isoformat(),
-            "feed_max": max_feed_date.isoformat(),
-            "feed_prev": (selected_date - dt.timedelta(days=1)).isoformat() if selected_date > min_feed_date else None,
-            "feed_next": (selected_date + dt.timedelta(days=1)).isoformat() if selected_date < max_feed_date else None,
-            "missions": [dict(r) for r in conn.execute(
-                "SELECT * FROM missions WHERE deleted_at IS NULL AND status IN ('open','claimed','submitted') "
-                "ORDER BY CASE status WHEN 'submitted' THEN 0 WHEN 'claimed' THEN 1 ELSE 2 END, id DESC "
-                "LIMIT 6"
-            ).fetchall()],
+            "today_checkins": int(today_checkins),
+            "active_missions": active_missions,
+            "pending": _pending_summary(),
         }
         return templates.TemplateResponse(request, "dashboard.html", ctx)
+
+    @app.get("/activity", response_class=HTMLResponse)
+    def activity_page(request: Request, feed_date: str = "", kind: str = "all",
+                      error: str = ""):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        now = _now()
+        stage, _ = lifecycle.ensure_state(conn, now)
+        cutoff = int(stage["cutoff_hour"]) if stage else 4
+        logical_today = lifecycle.logical_date(now, cutoff)
+        first = conn.execute(
+            "SELECT MIN(first_at) AS first_at FROM ("
+            "SELECT MIN(created_at) AS first_at FROM checkins WHERE deleted_at IS NULL AND kind!='adjustment' "
+            "UNION ALL SELECT MIN(created_at) FROM missions WHERE deleted_at IS NULL)"
+        ).fetchone()["first_at"]
+        earliest = lifecycle.logical_date(dt.datetime.fromisoformat(first), cutoff) if first else logical_today
+        minimum = dt.date.fromisoformat(stage["starts_on"]) if stage else earliest
+        maximum = min(logical_today, dt.date.fromisoformat(stage["ends_on"]) if stage else logical_today)
+        if minimum > maximum:
+            minimum = maximum
+        try:
+            selected = dt.date.fromisoformat(feed_date) if feed_date else logical_today
+        except ValueError:
+            selected = logical_today
+        selected = min(max(selected, minimum), maximum)
+        start = dt.datetime.combine(selected, dt.time(hour=cutoff))
+        end = start + dt.timedelta(days=1)
+        start_iso, end_iso = start.isoformat(), end.isoformat()
+
+        items = []
+        if kind in ("all", "checkin"):
+            rows = [dict(r) for r in conn.execute(
+                "SELECT c.*,t.name AS task_name FROM checkins c LEFT JOIN task_catalog t ON t.id=c.task_id "
+                "WHERE c.deleted_at IS NULL AND c.kind!='adjustment' AND c.created_at>=? AND c.created_at<?",
+                (start_iso, end_iso),
+            ).fetchall()]
+            for row in _build_feed(rows):
+                items.append({"item_type": "checkin", "occurred_at": row["created_at"], "checkin": row})
+        if kind in ("all", "mission"):
+            mission_rows = conn.execute(
+                "SELECT * FROM missions WHERE deleted_at IS NULL AND ("
+                "(created_at>=? AND created_at<?) OR (claimed_at>=? AND claimed_at<?))",
+                (start_iso, end_iso, start_iso, end_iso),
+            ).fetchall()
+            for row in mission_rows:
+                mission = dict(row)
+                mission["mission_id"] = mission["id"]
+                if start_iso <= mission["created_at"] < end_iso:
+                    items.append({"item_type": "mission", "event_type": "published",
+                                  "occurred_at": mission["created_at"], "mission": mission})
+                if mission["claimed_at"] and start_iso <= mission["claimed_at"] < end_iso:
+                    items.append({"item_type": "mission", "event_type": "claimed",
+                                  "occurred_at": mission["claimed_at"], "mission": mission})
+            submissions = conn.execute(
+                "SELECT s.*,m.title,m.points,m.awarded_points,m.deleted_at FROM mission_submissions s "
+                "JOIN missions m ON m.id=s.mission_id WHERE m.deleted_at IS NULL AND ("
+                "(s.submitted_at>=? AND s.submitted_at<?) OR (s.reviewed_at>=? AND s.reviewed_at<?))",
+                (start_iso, end_iso, start_iso, end_iso),
+            ).fetchall()
+            for row in submissions:
+                mission = dict(row)
+                if start_iso <= mission["submitted_at"] < end_iso:
+                    items.append({"item_type": "mission", "event_type": "submitted",
+                                  "occurred_at": mission["submitted_at"], "mission": mission})
+                if mission["reviewed_at"] and start_iso <= mission["reviewed_at"] < end_iso:
+                    items.append({"item_type": "mission",
+                                  "event_type": mission["decision"] or "reviewed",
+                                  "occurred_at": mission["reviewed_at"], "mission": mission})
+        # 同一任务在一个逻辑日只占一张卡片；卡内展示当天发生过的状态变化，
+        # 主状态使用当天最后一次变化，避免“领取/提交/审核”重复刷屏。
+        grouped_missions = {}
+        checkin_items = []
+        for item in items:
+            if item["item_type"] == "checkin":
+                checkin_items.append(item)
+                continue
+            mission_id = item["mission"].get("mission_id") or item["mission"].get("id")
+            grouped = grouped_missions.get(mission_id)
+            if grouped is None:
+                grouped = dict(item)
+                grouped["today_events"] = []
+                grouped_missions[mission_id] = grouped
+            if item["event_type"] not in grouped["today_events"]:
+                grouped["today_events"].append(item["event_type"])
+            if item["occurred_at"] >= grouped["occurred_at"]:
+                grouped["occurred_at"] = item["occurred_at"]
+                grouped["event_type"] = item["event_type"]
+        for mission_id, grouped in grouped_missions.items():
+            current = conn.execute(
+                "SELECT * FROM missions WHERE id=? AND deleted_at IS NULL", (mission_id,)
+            ).fetchone()
+            if current:
+                mission = dict(current)
+                progress = ["published"]
+                if mission["claimed_at"]:
+                    progress.append("claimed")
+                if mission["submitted_at"]:
+                    progress.append("submitted")
+                if mission["status"] == "completed":
+                    progress.append("approved")
+                elif mission["rejection_reason"]:
+                    progress.append("rejected")
+                grouped["mission"] = mission
+                grouped["progress"] = progress
+        items = checkin_items + list(grouped_missions.values())
+        items.sort(key=lambda item: item["occurred_at"], reverse=True)
+        active = conn.execute(
+            "SELECT * FROM missions WHERE deleted_at IS NULL AND status IN ('open','claimed') "
+            "ORDER BY CASE status WHEN 'claimed' THEN 0 ELSE 1 END,id DESC"
+        ).fetchall()
+        return templates.TemplateResponse(request, "activity.html", {
+            "request": request, "role": auth.current_role(request), "items": items,
+            "missions": active, "kind": kind if kind in ("all", "checkin", "mission") else "all",
+            "error": error, "feed_date": selected.isoformat(),
+            "feed_today": logical_today.isoformat(), "feed_min": minimum.isoformat(),
+            "feed_max": maximum.isoformat(),
+            "feed_prev": (selected - dt.timedelta(days=1)).isoformat() if selected > minimum else None,
+            "feed_next": (selected + dt.timedelta(days=1)).isoformat() if selected < maximum else None,
+        })
 
     @app.get("/history", response_class=HTMLResponse)
     def history_list(request: Request):
@@ -434,7 +571,7 @@ def create_app() -> FastAPI:
                 (cid, name, role, body.strip(), _now().isoformat(timespec="seconds")),
             )
             conn.commit()
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/activity", status_code=303)
 
     @app.post("/checkin/{cid}/react")
     def add_react(request: Request, cid: int, kind: str = Form(...)):
@@ -445,25 +582,20 @@ def create_app() -> FastAPI:
             "SELECT 1 FROM checkins WHERE id=? AND deleted_at IS NULL", (cid,),
         ).fetchone()
         if not target:
-            return RedirectResponse("/", status_code=303)
+            return RedirectResponse("/activity", status_code=303)
         conn.execute(
             "INSERT INTO reactions (checkin_id, author_name, kind, created_at)"
             " VALUES (?,?,?,?)",
             (cid, name, kind, _now().isoformat(timespec="seconds")),
         )
         conn.commit()
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/activity", status_code=303)
 
-    @app.get("/review", response_class=HTMLResponse)
+    @app.get("/review")
     def review_list(request: Request):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
-        pend = conn.execute(
-            "SELECT * FROM checkins WHERE status='pending' AND deleted_at IS NULL ORDER BY id"
-        ).fetchall()
-        return templates.TemplateResponse(
-            request, "review.html", {"request": request, "pending": pend}
-        )
+        return RedirectResponse("/admin/reviews?kind=checkin", status_code=303)
 
     @app.post("/review/{cid}")
     def review_act(
@@ -472,13 +604,20 @@ def create_app() -> FastAPI:
     ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
+        pending_row = conn.execute(
+            "SELECT * FROM checkins WHERE id=? AND status='pending' AND deleted_at IS NULL", (cid,)
+        ).fetchone()
+        if pending_row is None:
+            return RedirectResponse(
+                "/admin/reviews?kind=checkin&message=这条打卡已经处理", status_code=303,
+            )
         reviewer = auth.current_name(request) or "监管者"
         now = _now().isoformat(timespec="seconds")
         if action == "approve":
             try:
                 awarded = int(points or 0)
             except ValueError:
-                return RedirectResponse("/review", status_code=303)
+                return RedirectResponse("/admin/reviews?kind=checkin", status_code=303)
             conn.execute(
                 "UPDATE checkins SET status='scored', awarded_points=?, "
                 "reviewed_by=?, reviewed_at=? WHERE id=?",
@@ -495,7 +634,7 @@ def create_app() -> FastAPI:
             row = conn.execute("SELECT title FROM checkins WHERE id=?", (cid,)).fetchone()
             _sync_points(awarded, "earn", row["title"] or "清单外打卡",
                          "checkin", cid, reviewer, _now())
-        return RedirectResponse("/review", status_code=303)
+        return RedirectResponse("/admin/reviews?kind=checkin", status_code=303)
 
     @app.post("/adjust")
     def adjust(request: Request, points: str = Form(...), reason: str = Form("")):
@@ -507,7 +646,7 @@ def create_app() -> FastAPI:
         try:
             delta = int(points)
         except ValueError:
-            return RedirectResponse("/review", status_code=303)
+            return RedirectResponse("/admin/points", status_code=303)
         cid = conn.execute(
             "INSERT INTO checkins (kind, period_id, title, note, awarded_points,"
             " status, created_at, reviewed_by, reviewed_at) VALUES "
@@ -517,7 +656,47 @@ def create_app() -> FastAPI:
         conn.commit()
         _sync_points(delta, "adjustment", reason.strip() or "管理者积分调整",
                      "checkin", cid, reviewer, _now())
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/admin/points", status_code=303)
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin_home(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        return templates.TemplateResponse(request, "admin.html", {
+            "request": request, "pending": _pending_summary(),
+        })
+
+    @app.get("/admin/reviews", response_class=HTMLResponse)
+    def admin_reviews(request: Request, kind: str = "all", message: str = ""):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        allowed = kind if kind in ("all", "checkin", "mission", "time_exchange") else "all"
+        return templates.TemplateResponse(request, "reviews_admin.html", {
+            "request": request, "kind": allowed, "message": message,
+            "pending": _pending_summary(),
+            "checkins": conn.execute(
+                "SELECT * FROM checkins WHERE status='pending' AND deleted_at IS NULL ORDER BY id"
+            ).fetchall() if allowed in ("all", "checkin") else [],
+            "missions": conn.execute(
+                "SELECT * FROM missions WHERE status='submitted' AND deleted_at IS NULL ORDER BY submitted_at"
+            ).fetchall() if allowed in ("all", "mission") else [],
+            "exchanges": conn.execute(
+                "SELECT r.*,s.name AS stage_name FROM time_exchange_requests r "
+                "JOIN stages s ON s.id=r.stage_id WHERE r.status='pending' ORDER BY r.created_at"
+            ).fetchall() if allowed in ("all", "time_exchange") else [],
+        })
+
+    @app.get("/admin/points", response_class=HTMLResponse)
+    def admin_points(request: Request):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        stage, window = lifecycle.ensure_state(conn, _now())
+        return templates.TemplateResponse(request, "points_admin.html", {
+            "request": request, "summary": lifecycle.point_summary(conn, stage, window),
+            "rows": conn.execute(
+                "SELECT * FROM point_ledger WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 50"
+            ).fetchall(),
+        })
 
     @app.get("/admin/catalog", response_class=HTMLResponse)
     def catalog_page(request: Request):
@@ -615,19 +794,11 @@ def create_app() -> FastAPI:
         )
         conn.commit()
 
-    @app.get("/missions", response_class=HTMLResponse)
+    @app.get("/missions")
     def missions_page(request: Request):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
-        _expire_missions(_now().isoformat(timespec="seconds"))
-        rows = conn.execute(
-            "SELECT * FROM missions WHERE deleted_at IS NULL ORDER BY "
-            "CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 WHEN 'submitted' THEN 2 ELSE 3 END, "
-            "id DESC LIMIT 100"
-        ).fetchall()
-        return templates.TemplateResponse(request, "missions.html", {
-            "request": request, "missions": rows, "role": auth.current_role(request)
-        })
+        return RedirectResponse("/activity#missions", status_code=303)
 
     @app.post("/missions/{mid}/claim")
     def mission_claim(request: Request, mid: int):
@@ -640,7 +811,7 @@ def create_app() -> FastAPI:
             (now, mid),
         )
         conn.commit()
-        return RedirectResponse("/missions", status_code=303)
+        return RedirectResponse("/activity#missions", status_code=303)
 
     @app.post("/missions/{mid}/submit")
     async def mission_submit(
@@ -654,13 +825,13 @@ def create_app() -> FastAPI:
             "SELECT * FROM missions WHERE id=? AND status='claimed' AND deleted_at IS NULL", (mid,)
         ).fetchone()
         if mission is None:
-            return RedirectResponse("/missions", status_code=303)
+            return RedirectResponse("/activity#missions", status_code=303)
         try:
             photo_path = await _save_photo_choice(photo_camera, photo_album, photo)
         except PhotoError:
-            return RedirectResponse("/missions?error=照片格式不支持或文件过大", status_code=303)
+            return RedirectResponse("/activity?error=照片格式不支持或文件过大#missions", status_code=303)
         if mission["photo_required"] and not photo_path:
-            return RedirectResponse("/missions?error=这个任务需要完成照片", status_code=303)
+            return RedirectResponse("/activity?error=这个任务需要完成照片#missions", status_code=303)
         now = _now().isoformat(timespec="seconds")
         conn.execute(
             "UPDATE missions SET status='submitted', submitted_at=?, submission_note=?, "
@@ -672,7 +843,7 @@ def create_app() -> FastAPI:
             "VALUES (?,?,?,?)", (mid, note.strip(), photo_path, now),
         )
         conn.commit()
-        return RedirectResponse("/missions", status_code=303)
+        return RedirectResponse("/activity#missions", status_code=303)
 
     @app.get("/admin/missions", response_class=HTMLResponse)
     def admin_missions(request: Request, error: str = ""):
@@ -757,7 +928,9 @@ def create_app() -> FastAPI:
             "SELECT * FROM missions WHERE id=? AND status='submitted' AND deleted_at IS NULL", (mid,)
         ).fetchone()
         if mission is None:
-            return RedirectResponse("/admin/missions", status_code=303)
+            return RedirectResponse(
+                "/admin/reviews?kind=mission&message=这条任务已经处理", status_code=303,
+            )
         reviewer = auth.current_name(request) or "监管者"
         now_dt = _now()
         now = now_dt.isoformat(timespec="seconds")
@@ -769,7 +942,9 @@ def create_app() -> FastAPI:
             try:
                 awarded = int(points)
             except ValueError:
-                return RedirectResponse("/admin/missions?error=积分必须是整数", status_code=303)
+                return RedirectResponse(
+                    "/admin/reviews?kind=mission&message=积分必须是整数", status_code=303,
+                )
             conn.execute(
                 "UPDATE missions SET status='completed', reviewed_at=?, reviewed_by=?, "
                 "awarded_points=?, rejection_reason=NULL WHERE id=? AND status='submitted'",
@@ -795,7 +970,7 @@ def create_app() -> FastAPI:
                     "WHERE id=?", (now, reviewer, reason.strip(), submission["id"]),
                 )
             conn.commit()
-        return RedirectResponse("/admin/missions", status_code=303)
+        return RedirectResponse("/admin/reviews?kind=mission", status_code=303)
 
     @app.get("/admin/stages", response_class=HTMLResponse)
     def stages_page(request: Request, error: str = ""):
@@ -818,7 +993,10 @@ def create_app() -> FastAPI:
         mode: str = Form("daily"), cutoff_hour: str = Form("4"),
         window_start_weekday: str = Form("4"), window_end_weekday: str = Form("0"),
         points_goal: str = Form("30"), basic_minutes: str = Form("120"),
-        reward_minutes: str = Form("120"),
+        reward_minutes: str = Form("120"), exchange_enabled: str = Form("0"),
+        exchange_points_per_unit: str = Form("10"),
+        exchange_minutes_per_unit: str = Form("30"),
+        exchange_daily_limit_minutes: str = Form("60"),
     ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
@@ -829,28 +1007,38 @@ def create_app() -> FastAPI:
             goal_value, base_value, reward_value = map(
                 int, (points_goal, basic_minutes, reward_minutes),
             )
+            exchange_points, exchange_minutes, exchange_limit = map(
+                int, (exchange_points_per_unit, exchange_minutes_per_unit,
+                      exchange_daily_limit_minutes),
+            )
             dt.date.fromisoformat(starts_on)
             dt.date.fromisoformat(ends_on)
         except (ValueError, TypeError):
             return RedirectResponse("/admin/stages?error=日期和数字格式不正确", status_code=303)
         if (not name.strip() or starts_on > ends_on or mode not in ("daily", "weekly")
                 or not 0 <= cutoff <= 23 or not 0 <= start_wd <= 6 or not 0 <= end_wd <= 6
-                or min(goal_value, base_value, reward_value) < 0):
+                or min(goal_value, base_value, reward_value, exchange_limit) < 0
+                or exchange_points <= 0 or exchange_minutes <= 0):
             return RedirectResponse("/admin/stages?error=阶段规则不合法", status_code=303)
         payload = (name.strip(), starts_on, ends_on, mode, cutoff, start_wd,
-                   end_wd, goal_value, base_value, reward_value)
+                   end_wd, goal_value, base_value, reward_value,
+                   1 if exchange_enabled == "1" else 0, exchange_points,
+                   exchange_minutes, exchange_limit)
         if op == "update" and stage_id:
             conn.execute(
                 "UPDATE stages SET name=?,starts_on=?,ends_on=?,mode=?,cutoff_hour=?,"
                 "window_start_weekday=?,window_end_weekday=?,points_goal=?,basic_minutes=?,"
-                "reward_minutes=? WHERE id=?",
+                "reward_minutes=?,exchange_enabled=?,exchange_points_per_unit=?,"
+                "exchange_minutes_per_unit=?,exchange_daily_limit_minutes=? WHERE id=?",
                 payload + (stage_id,),
             )
         else:
             conn.execute(
                 "INSERT INTO stages (name,starts_on,ends_on,mode,cutoff_hour,"
                 "window_start_weekday,window_end_weekday,points_goal,basic_minutes,"
-                "reward_minutes,active,created_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?)",
+                "reward_minutes,exchange_enabled,exchange_points_per_unit,"
+                "exchange_minutes_per_unit,exchange_daily_limit_minutes,active,created_at,created_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
                 payload + (_now().isoformat(timespec="seconds"),
                            auth.current_name(request) or "监管者"),
             )
@@ -893,19 +1081,191 @@ def create_app() -> FastAPI:
         lifecycle.ensure_state(conn, now)
         return RedirectResponse("/admin/stages", status_code=303)
 
-    @app.get("/computer/history", response_class=HTMLResponse)
-    def computer_history(request: Request):
+    @app.post("/time-exchanges")
+    def exchange_request_create(request: Request, units: str = Form("1")):
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/login", status_code=303)
+        now = _now()
+        stage, window = lifecycle.ensure_state(conn, now)
+        if not stage or not stage["exchange_enabled"]:
+            return RedirectResponse("/computer?error=当前阶段没有开放额外时长兑换", status_code=303)
+        try:
+            count = int(units)
+        except ValueError:
+            count = 0
+        if count <= 0:
+            return RedirectResponse("/computer?error=请选择有效兑换份数", status_code=303)
+        day = lifecycle.logical_date(now, int(stage["cutoff_hour"])).isoformat()
+        pending = conn.execute(
+            "SELECT 1 FROM time_exchange_requests WHERE stage_id=? AND logical_date=? "
+            "AND status='pending'", (stage["id"], day),
+        ).fetchone()
+        if pending:
+            return RedirectResponse("/computer?error=今天已有一笔兑换等待审批", status_code=303)
+        point_unit = int(stage["exchange_points_per_unit"])
+        minute_unit = int(stage["exchange_minutes_per_unit"])
+        cost, minutes = point_unit * count, minute_unit * count
+        summary = lifecycle.point_summary(conn, stage, window)
+        if cost > summary["spendable"]:
+            return RedirectResponse("/computer?error=可兑换积分不足", status_code=303)
+        approved = conn.execute(
+            "SELECT COALESCE(SUM(minutes_requested),0) AS n FROM time_exchange_requests "
+            "WHERE stage_id=? AND logical_date=? AND status='approved'", (stage["id"], day),
+        ).fetchone()["n"]
+        limit = int(stage["exchange_daily_limit_minutes"])
+        if limit and int(approved) + minutes > limit:
+            return RedirectResponse("/computer?error=超过当前阶段的每日兑换上限", status_code=303)
+        conn.execute(
+            "INSERT INTO time_exchange_requests (stage_id,logical_date,requester_name,units,"
+            "points_per_unit,minutes_per_unit,points_cost,minutes_requested,status,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,'pending',?)",
+            (stage["id"], day, auth.current_name(request) or CHECKIN_NAME, count,
+             point_unit, minute_unit, cost, minutes, now.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        return RedirectResponse("/computer?message=兑换申请已提交，等待管理者审批", status_code=303)
+
+    @app.post("/time-exchanges/{exchange_id}/cancel")
+    def exchange_request_cancel(request: Request, exchange_id: int):
+        if auth.current_role(request) != auth.ROLE_CHECKIN:
+            return RedirectResponse("/login", status_code=303)
+        conn.execute(
+            "UPDATE time_exchange_requests SET status='cancelled',reviewed_at=?,"
+            "review_reason='申请人取消' WHERE id=? AND status='pending' AND requester_name=?",
+            (_now().isoformat(timespec="seconds"), exchange_id,
+             auth.current_name(request) or CHECKIN_NAME),
+        )
+        conn.commit()
+        return RedirectResponse("/computer?message=兑换申请已取消", status_code=303)
+
+    @app.post("/admin/time-exchanges/{exchange_id}/review")
+    def exchange_request_review(request: Request, exchange_id: int,
+                                action: str = Form(...), reason: str = Form("")):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        now = _now()
+        reviewer = auth.current_name(request) or "监管者"
+        if action != "approve":
+            changed = conn.execute(
+                "UPDATE time_exchange_requests SET status='rejected',reviewed_at=?,"
+                "reviewed_by=?,review_reason=? WHERE id=? AND status='pending'",
+                (now.isoformat(timespec="seconds"), reviewer,
+                 reason.strip() or "本次兑换未批准", exchange_id),
+            ).rowcount
+            conn.commit()
+            message = "兑换申请已驳回" if changed else "这笔申请已经处理"
+            return RedirectResponse(f"/admin/reviews?kind=time_exchange&message={message}", status_code=303)
+
+        stage, window = lifecycle.ensure_state(conn, now)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT r.*,s.active,s.cutoff_hour,s.exchange_enabled,s.exchange_daily_limit_minutes "
+                "FROM time_exchange_requests r JOIN stages s ON s.id=r.stage_id "
+                "WHERE r.id=? AND r.status='pending'", (exchange_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("这笔申请已经处理")
+            day = lifecycle.logical_date(now, int(row["cutoff_hour"])).isoformat()
+            if (not stage or stage["id"] != row["stage_id"] or not row["active"]
+                    or not row["exchange_enabled"] or day != row["logical_date"]):
+                raise ValueError("申请所属阶段或逻辑日已经结束")
+            approved = conn.execute(
+                "SELECT COALESCE(SUM(minutes_requested),0) AS n FROM time_exchange_requests "
+                "WHERE stage_id=? AND logical_date=? AND status='approved'",
+                (row["stage_id"], row["logical_date"]),
+            ).fetchone()["n"]
+            limit = int(row["exchange_daily_limit_minutes"])
+            if limit and int(approved) + int(row["minutes_requested"]) > limit:
+                raise ValueError("批准后会超过每日兑换上限")
+            summary = lifecycle.point_summary(conn, stage, window)
+            if int(row["points_cost"]) > summary["spendable"]:
+                raise ValueError("当前可兑换积分已经不足")
+            now_iso = now.isoformat(timespec="seconds")
+            ledger_id = conn.execute(
+                "INSERT INTO point_ledger (delta,entry_type,description,source_type,source_id,"
+                "actor_name,created_at,window_id) VALUES (?,?,?,?,?,?,?,?)",
+                (-int(row["points_cost"]), "exchange", "额外电脑时长兑换",
+                 "time_exchange", str(row["id"]), reviewer, now_iso,
+                 window["id"] if window else None),
+            ).lastrowid
+            grant_id = conn.execute(
+                "INSERT INTO time_grants (logical_date,minutes,grant_type,description,source_type,"
+                "source_id,actor_name,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (row["logical_date"], int(row["minutes_requested"]), "exchange",
+                 f"{row['points_cost']}积分兑换", "time_exchange", str(row["id"]),
+                 reviewer, now_iso),
+            ).lastrowid
+            changed = conn.execute(
+                "UPDATE time_exchange_requests SET status='approved',reviewed_at=?,reviewed_by=?,"
+                "review_reason=?,point_ledger_id=?,time_grant_id=? WHERE id=? AND status='pending'",
+                (now_iso, reviewer, reason.strip(), ledger_id, grant_id, row["id"]),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("这笔申请已经处理")
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            message = str(exc) if isinstance(exc, ValueError) else "审批失败，请重试"
+            return RedirectResponse(f"/admin/reviews?kind=time_exchange&message={message}", status_code=303)
+        lifecycle.ensure_state(conn, now)
+        return RedirectResponse(
+            "/admin/reviews?kind=time_exchange&message=兑换已批准，积分和时长已经同步入账",
+            status_code=303,
+        )
+
+    @app.get("/computer", response_class=HTMLResponse)
+    def computer_page(request: Request, tab: str = "overview", error: str = "",
+                      message: str = ""):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
-        stage, _ = lifecycle.ensure_state(conn, _now())
+        now = _now()
+        stage, window = lifecycle.ensure_state(conn, now)
         cutoff = int(stage["cutoff_hour"]) if stage else 4
-        return templates.TemplateResponse(request, "computer_history.html", {
-            "request": request,
-            "summary": lifecycle.computer_summary(conn, _now(), cutoff),
+        summary = lifecycle.computer_summary(conn, now, cutoff)
+        points = lifecycle.point_summary(conn, stage, window)
+        requests = conn.execute(
+            "SELECT r.*,s.name AS stage_name FROM time_exchange_requests r "
+            "JOIN stages s ON s.id=r.stage_id ORDER BY r.id DESC LIMIT 20"
+        ).fetchall()
+        approved = 0
+        pending_request = None
+        if stage:
+            approved = conn.execute(
+                "SELECT COALESCE(SUM(minutes_requested),0) AS n FROM time_exchange_requests "
+                "WHERE stage_id=? AND logical_date=? AND status='approved'",
+                (stage["id"], summary["logical_date"]),
+            ).fetchone()["n"]
+            pending_request = conn.execute(
+                "SELECT * FROM time_exchange_requests WHERE stage_id=? AND logical_date=? "
+                "AND status='pending' ORDER BY id DESC LIMIT 1",
+                (stage["id"], summary["logical_date"]),
+            ).fetchone()
+        max_units = 0
+        if stage and stage["exchange_enabled"]:
+            max_units = points["spendable"] // int(stage["exchange_points_per_unit"])
+            limit = int(stage["exchange_daily_limit_minutes"])
+            if limit:
+                max_units = min(max_units, max(0, limit - int(approved))
+                                // int(stage["exchange_minutes_per_unit"]))
+        return templates.TemplateResponse(request, "computer.html", {
+            "request": request, "role": auth.current_role(request), "tab": tab,
+            "error": error, "message": message, "stage": stage, "summary": summary,
+            "points": points, "max_units": max_units, "approved_exchange_minutes": int(approved),
+            "pending_request": pending_request, "exchange_requests": requests,
             "sessions": conn.execute(
                 "SELECT * FROM computer_sessions WHERE deleted_at IS NULL ORDER BY start_at DESC LIMIT 200"
             ).fetchall(),
+            "audits": conn.execute(
+                "SELECT * FROM computer_session_audits ORDER BY id DESC LIMIT 50"
+            ).fetchall() if auth.current_role(request) == auth.ROLE_SUPERVISOR else [],
         })
+
+    @app.get("/computer/history")
+    def computer_history(request: Request):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        return RedirectResponse("/computer", status_code=303)
 
     def _session_overlaps(start_at, end_at, exclude_id=None):
         sql = ("SELECT id FROM computer_sessions WHERE start_at < ? "
@@ -916,22 +1276,12 @@ def create_app() -> FastAPI:
             args.append(exclude_id)
         return conn.execute(sql, args).fetchone() is not None
 
-    @app.get("/admin/computer", response_class=HTMLResponse)
+    @app.get("/admin/computer")
     def admin_computer(request: Request, error: str = ""):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
-        stage, _ = lifecycle.ensure_state(conn, _now())
-        cutoff = int(stage["cutoff_hour"]) if stage else 4
-        return templates.TemplateResponse(request, "computer_admin.html", {
-            "request": request, "error": error,
-            "summary": lifecycle.computer_summary(conn, _now(), cutoff),
-            "sessions": conn.execute(
-                "SELECT * FROM computer_sessions WHERE deleted_at IS NULL ORDER BY start_at DESC LIMIT 100"
-            ).fetchall(),
-            "audits": conn.execute(
-                "SELECT * FROM computer_session_audits ORDER BY id DESC LIMIT 50"
-            ).fetchall(),
-        })
+        suffix = f"&error={error}" if error else ""
+        return RedirectResponse(f"/computer?tab=manage{suffix}", status_code=303)
 
     @app.post("/admin/computer/grant")
     def computer_grant(
@@ -944,9 +1294,9 @@ def create_app() -> FastAPI:
             dt.date.fromisoformat(logical_date)
             value = int(minutes)
         except ValueError:
-            return RedirectResponse("/admin/computer?error=日期或分钟格式错误", status_code=303)
+            return RedirectResponse("/computer?tab=manage&error=日期或分钟格式错误", status_code=303)
         if not reason.strip() or value == 0:
-            return RedirectResponse("/admin/computer?error=调整分钟和原因不能为空", status_code=303)
+            return RedirectResponse("/computer?tab=manage&error=调整分钟和原因不能为空", status_code=303)
         now = _now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT INTO time_grants (logical_date,minutes,grant_type,description,"
@@ -955,7 +1305,7 @@ def create_app() -> FastAPI:
              auth.current_name(request) or "监管者", now),
         )
         conn.commit()
-        return RedirectResponse("/admin/computer", status_code=303)
+        return RedirectResponse("/computer?tab=manage&message=时长调整已记录", status_code=303)
 
     @app.post("/admin/computer/session")
     def computer_session_edit(
@@ -970,18 +1320,18 @@ def create_app() -> FastAPI:
             start_dt = dt.datetime.fromisoformat(start)
             end_dt = dt.datetime.fromisoformat(end) if end else None
         except ValueError:
-            return RedirectResponse("/admin/computer?error=时间格式错误", status_code=303)
+            return RedirectResponse("/computer?tab=manage&error=时间格式错误", status_code=303)
         if not reason.strip() or (end_dt and end_dt <= start_dt):
-            return RedirectResponse("/admin/computer?error=请填写原因并检查起止时间", status_code=303)
+            return RedirectResponse("/computer?tab=manage&error=请填写原因并检查起止时间", status_code=303)
         sid = int(session_id) if session_id else None
         if _session_overlaps(start, end, sid):
-            return RedirectResponse("/admin/computer?error=该时段与已有记录重叠", status_code=303)
+            return RedirectResponse("/computer?tab=manage&error=该时段与已有记录重叠", status_code=303)
         actor = auth.current_name(request) or "监管者"
         now = _now().isoformat(timespec="seconds")
         if sid:
             before = conn.execute("SELECT * FROM computer_sessions WHERE id=?", (sid,)).fetchone()
             if before is None:
-                return RedirectResponse("/admin/computer", status_code=303)
+                return RedirectResponse("/computer?tab=manage", status_code=303)
             conn.execute(
                 "UPDATE computer_sessions SET start_at=?,end_at=?,ended_by=?,note=?,updated_at=? "
                 "WHERE id=?", (start, end, actor, reason.strip(), now, sid),
@@ -1002,7 +1352,7 @@ def create_app() -> FastAPI:
             (sid, action, before_start, before_end, start, end, actor, reason.strip(), now),
         )
         conn.commit()
-        return RedirectResponse("/admin/computer", status_code=303)
+        return RedirectResponse("/computer?tab=manage&message=电脑记录已保存", status_code=303)
 
     @app.post("/admin/computer/force-off")
     def computer_force_off(request: Request, reason: str = Form(...)):
@@ -1027,7 +1377,7 @@ def create_app() -> FastAPI:
                  row["start_at"], now, actor, reason.strip(), now),
             )
             conn.commit()
-        return RedirectResponse("/admin/computer", status_code=303)
+        return RedirectResponse("/computer?tab=manage&message=使用中会话已结束", status_code=303)
 
     @app.get("/admin/trash", response_class=HTMLResponse)
     def trash_page(request: Request, error: str = ""):

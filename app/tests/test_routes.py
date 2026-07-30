@@ -118,10 +118,13 @@ def test_adhoc_checkin_is_pending(client):
 
 def test_computer_on_then_off_creates_closed_session(client):
     _login_checkin(client)
-    r = client.post("/computer/on")
-    assert r.status_code == 303
-    r = client.post("/computer/off")
-    assert r.status_code == 303
+    home = client.get("/")
+    assert "home-computer-actions" in home.text
+    assert "▶ 开机" in home.text and "■ 关机" in home.text
+    r = client.post("/computer/on", data={"return_to": "/"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    r = client.post("/computer/off", data={"return_to": "/"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
     rows = client.app.state.conn.execute(
         "SELECT * FROM computer_sessions ORDER BY id DESC LIMIT 1"
     ).fetchone()
@@ -147,8 +150,9 @@ def test_dashboard_shows_week_and_today_totals(client):
     )
     r = client.get("/")
     assert r.status_code == 200
-    assert "本周期累计" in r.text
-    assert "今日电脑使用" in r.text
+    assert "今日概况" in r.text
+    assert "今日电脑" in r.text
+    assert "今日打卡" in r.text
     assert "10" in r.text  # 全屋吸尘 10 分
 
 
@@ -190,6 +194,9 @@ def test_review_list_shows_pending(client):
     client.post("/login", data={"password": "jia"})
     client.post("/whoami", data={"name": "惠姐"})
     r = client.get("/review")
+    assert r.status_code == 303
+    assert r.headers["location"] == "/admin/reviews?kind=checkin"
+    r = client.get(r.headers["location"])
     assert r.status_code == 200 and "擦窗" in r.text
 
 
@@ -216,7 +223,8 @@ def test_reject_sets_rejected(client):
                 files={"photo": ("a.jpg", _jpg_bytes(), "image/jpeg")})
     cid = client.app.state.conn.execute(
         "SELECT id FROM checkins ORDER BY id DESC LIMIT 1").fetchone()["id"]
-    client.get("/logout"); client.post("/login", data={"password": "jia"})
+    client.get("/logout")
+    client.post("/login", data={"password": "jia"})
     client.post("/whoami", data={"name": "惠姐"})
     client.post(f"/review/{cid}", data={"action": "reject", "points": "0"})
     row = client.app.state.conn.execute(
@@ -277,12 +285,12 @@ def test_supervisor_sets_period_goal_reflected_on_dashboard(client):
     _sup(client)
     # 默认目标 80
     r = client.get("/")
-    assert "/80" in r.text
+    assert "/ 80" in r.text
     # 改成 50，无需重启/发版
     r = client.post("/admin/announcement", data={"body": "", "goal": "50"})
     assert r.status_code == 303
     r = client.get("/")
-    assert "/50" in r.text
+    assert "/ 50" in r.text
     assert client.app.state.conn.execute(
         "SELECT value FROM settings WHERE key='period_goal'"
     ).fetchone()["value"] == "50"
@@ -310,12 +318,11 @@ def test_feed_excludes_supervisor_adjustment(client):
     client.post("/login", data={"password": "jia"})
     client.post("/whoami", data={"name": "惠姐"})
     client.post("/adjust", data={"points": "-5", "reason": "顶嘴扣分"})
-    r = client.get("/")
+    r = client.get("/activity")
     assert r.status_code == 200
     assert "全屋吸尘" in r.text          # 打卡仍在动态
     assert "分值调整" not in r.text      # 监管者调整不在动态
-    # 但调整仍计入本周期总分：10 - 5 = 5
-    assert "本周期累计" in r.text
+    assert "冒险动态" in r.text
 
 
 def test_archive_closes_period_and_history_keeps_it(client):
@@ -328,9 +335,9 @@ def test_archive_closes_period_and_history_keeps_it(client):
     assert r.status_code == 200 and "第 1 期" in r.text
     r = client.post("/archive")
     assert r.status_code == 303 and r.headers["location"] == "/"
-    # 新周期：累计清零、第 2 期
+    # 新周期已创建；首页只展示状态，不再混入旧周期管理信息
     r = client.get("/")
-    assert "第 2 期" in r.text
+    assert "今日状态" in r.text
     conn = client.app.state.conn
     periods = conn.execute(
         "SELECT * FROM periods ORDER BY id").fetchall()
@@ -420,6 +427,11 @@ def test_stage_and_mission_flow_awards_points_once(client):
     assert conn.execute(
         "SELECT reward_unlocked FROM settlement_windows ORDER BY id DESC LIMIT 1"
     ).fetchone()["reward_unlocked"] == 1
+    activity = client.get("/activity?kind=mission")
+    assert activity.status_code == 200
+    assert activity.text.count("整理书桌") == 1
+    assert "发布" in activity.text and "领取" in activity.text
+    assert "提交" in activity.text and "通过" in activity.text
 
 
 def test_computer_adjustment_and_correction_are_audited(client):
@@ -451,11 +463,15 @@ def test_computer_adjustment_and_correction_are_audited(client):
 def test_new_supervisor_pages_render(client):
     _sup(client)
     for path in (
-        "/points", "/missions", "/admin/missions", "/admin/stages",
-        "/computer/history", "/admin/computer", "/admin/trash",
+        "/", "/activity", "/points", "/admin", "/admin/reviews",
+        "/admin/points", "/admin/missions", "/admin/stages",
+        "/computer", "/computer?tab=manage", "/admin/trash",
     ):
         response = client.get(path)
         assert response.status_code == 200, path
+    assert client.get("/missions").headers["location"] == "/activity#missions"
+    assert client.get("/computer/history").headers["location"] == "/computer"
+    assert client.get("/admin/computer").headers["location"].startswith("/computer?tab=manage")
 
 
 def test_supervisor_cannot_open_or_submit_checkin(client):
@@ -553,10 +569,176 @@ def test_feed_uses_logical_date_and_clamps_future(client):
         (pid, yesterday_at.isoformat(timespec="seconds")),
     )
     conn.commit()
-    today_page = client.get(f"/?feed_date={day.isoformat()}")
+    today_page = client.get(f"/activity?feed_date={day.isoformat()}")
     assert "ONLY_TODAY" in today_page.text and "ONLY_YESTERDAY" not in today_page.text
     yesterday = day - dt.timedelta(days=1)
-    old_page = client.get(f"/?feed_date={yesterday.isoformat()}")
+    old_page = client.get(f"/activity?feed_date={yesterday.isoformat()}")
     assert "ONLY_YESTERDAY" in old_page.text and "ONLY_TODAY" not in old_page.text
-    future_page = client.get("/?feed_date=2999-01-01")
+    future_page = client.get("/activity?feed_date=2999-01-01")
     assert f'value="{day.isoformat()}"' in future_page.text
+
+
+def test_supervisor_home_is_status_only_and_admin_has_real_management(client):
+    _sup(client)
+    home = client.get("/")
+    assert "今日状态" in home.text
+    assert "COMMAND CENTER" not in home.text
+    assert "home-computer-actions" not in home.text
+    assert 'href="/admin"' in home.text
+    assert 'href="/admin/trash"' not in home.text
+    admin = client.get("/admin")
+    assert "COMMAND CENTER" in admin.text
+    assert "待办审批" in admin.text and "回收站" in admin.text
+    assert "退出登录" in admin.text
+
+
+def test_pending_badges_combine_checkin_mission_and_exchange(client):
+    import datetime as dt
+    from chores.main import _now
+    from chores import lifecycle
+
+    _sup(client)
+    now = _now()
+    start = (now.date() - dt.timedelta(days=1)).isoformat()
+    end = (now.date() + dt.timedelta(days=1)).isoformat()
+    client.post("/admin/stages", data={
+        "name": "兑换阶段", "starts_on": start, "ends_on": end,
+        "mode": "daily", "cutoff_hour": "4", "points_goal": "100",
+        "basic_minutes": "0", "reward_minutes": "0", "exchange_enabled": "1",
+        "exchange_points_per_unit": "10", "exchange_minutes_per_unit": "30",
+        "exchange_daily_limit_minutes": "60",
+    })
+    conn = client.app.state.conn
+    sid = conn.execute("SELECT id FROM stages ORDER BY id DESC").fetchone()[0]
+    client.post(f"/admin/stages/{sid}/switch")
+    lifecycle.add_points(conn, 50, "earn", "测试积分", "test", "pending-badge", "系统",
+                         now.isoformat(timespec="seconds"))
+    conn.execute(
+        "INSERT INTO missions (title,points,photo_required,status,published_by,created_at,submitted_at) "
+        "VALUES ('待验收任务',10,0,'submitted','惠姐',?,?)",
+        (now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    client.get("/logout")
+    _login_checkin(client)
+    client.post("/checkin", data={"kind": "adhoc", "title": "待审核打卡", "proposed_points": "5"})
+    result = client.post("/time-exchanges", data={"units": "1"})
+    assert "message=" in result.headers["location"]
+    client.get("/logout")
+    _sup(client)
+    home = client.get("/")
+    assert "有 3 项等待处理" in home.text
+    admin = client.get("/admin")
+    assert "待验收任务" not in admin.text
+    reviews = client.get("/admin/reviews")
+    assert "待验收任务" in reviews.text
+    assert "待审核打卡" in reviews.text
+    assert "申请 30 分钟" in reviews.text
+
+
+def test_exchange_approval_atomically_deducts_points_and_grants_time(client):
+    import datetime as dt
+    from chores.main import _now
+    from chores import lifecycle
+
+    _sup(client)
+    now = _now()
+    client.post("/admin/stages", data={
+        "name": "兑换阶段", "starts_on": (now.date()-dt.timedelta(days=1)).isoformat(),
+        "ends_on": (now.date()+dt.timedelta(days=1)).isoformat(), "mode": "daily",
+        "cutoff_hour": "4", "points_goal": "100", "basic_minutes": "0",
+        "reward_minutes": "0", "exchange_enabled": "1",
+        "exchange_points_per_unit": "10", "exchange_minutes_per_unit": "30",
+        "exchange_daily_limit_minutes": "60",
+    })
+    conn = client.app.state.conn
+    sid = conn.execute("SELECT id FROM stages ORDER BY id DESC").fetchone()[0]
+    client.post(f"/admin/stages/{sid}/switch")
+    lifecycle.add_points(conn, 50, "earn", "兑换本金", "test", "exchange-funds", "系统",
+                         now.isoformat(timespec="seconds"))
+    conn.commit()
+    client.get("/logout")
+    _login_checkin(client)
+    response = client.post("/time-exchanges", data={"units": "2"})
+    assert response.status_code == 303
+    request_row = conn.execute("SELECT * FROM time_exchange_requests").fetchone()
+    assert request_row["status"] == "pending" and request_row["points_cost"] == 20
+    assert lifecycle.ledger_balance(conn) == 50
+    client.get("/logout")
+    _sup(client)
+    client.post(f"/admin/time-exchanges/{request_row['id']}/review", data={"action": "approve"})
+    approved = conn.execute(
+        "SELECT * FROM time_exchange_requests WHERE id=?", (request_row["id"],)
+    ).fetchone()
+    assert approved["status"] == "approved"
+    assert approved["point_ledger_id"] and approved["time_grant_id"]
+    assert lifecycle.ledger_balance(conn) == 30
+    grant = conn.execute("SELECT * FROM time_grants WHERE id=?", (approved["time_grant_id"],)).fetchone()
+    assert grant["minutes"] == 60 and grant["grant_type"] == "exchange"
+    # 重复审批不产生第二套流水。
+    client.post(f"/admin/time-exchanges/{request_row['id']}/review", data={"action": "approve"})
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM point_ledger WHERE source_type='time_exchange'"
+    ).fetchone()["n"] == 1
+
+
+def test_exchange_cannot_spend_points_locked_for_automatic_settlement(client):
+    import datetime as dt
+    from chores.main import _now
+    from chores import lifecycle
+
+    _sup(client)
+    now = _now()
+    client.post("/admin/stages", data={
+        "name": "锁定积分阶段", "starts_on": (now.date()-dt.timedelta(days=1)).isoformat(),
+        "ends_on": (now.date()+dt.timedelta(days=1)).isoformat(), "mode": "daily",
+        "cutoff_hour": "4", "points_goal": "30", "basic_minutes": "0",
+        "reward_minutes": "30", "exchange_enabled": "1",
+        "exchange_points_per_unit": "10", "exchange_minutes_per_unit": "30",
+        "exchange_daily_limit_minutes": "90",
+    })
+    conn = client.app.state.conn
+    sid = conn.execute("SELECT id FROM stages ORDER BY id DESC").fetchone()[0]
+    client.post(f"/admin/stages/{sid}/switch")
+    lifecycle.add_points(conn, 40, "earn", "达标积分", "test", "locked-funds", "系统",
+                         now.isoformat(timespec="seconds"))
+    conn.commit()
+    lifecycle.ensure_state(conn, now)
+    client.get("/logout")
+    _login_checkin(client)
+    blocked = client.post("/time-exchanges", data={"units": "2"})
+    assert "error=" in blocked.headers["location"]
+    assert conn.execute("SELECT COUNT(*) AS n FROM time_exchange_requests").fetchone()["n"] == 0
+    allowed = client.post("/time-exchanges", data={"units": "1"})
+    assert "message=" in allowed.headers["location"]
+
+
+def test_old_pending_exchange_expires_on_next_request(client):
+    import datetime as dt
+    from chores.main import _now
+    from chores import lifecycle
+
+    _sup(client)
+    now = _now()
+    client.post("/admin/stages", data={
+        "name": "过期测试阶段", "starts_on": (now.date()-dt.timedelta(days=2)).isoformat(),
+        "ends_on": (now.date()+dt.timedelta(days=1)).isoformat(), "mode": "daily",
+        "cutoff_hour": "4", "points_goal": "100", "basic_minutes": "0",
+        "reward_minutes": "0", "exchange_enabled": "1",
+        "exchange_points_per_unit": "10", "exchange_minutes_per_unit": "30",
+        "exchange_daily_limit_minutes": "60",
+    })
+    conn = client.app.state.conn
+    sid = conn.execute("SELECT id FROM stages ORDER BY id DESC").fetchone()[0]
+    client.post(f"/admin/stages/{sid}/switch")
+    old_day = (lifecycle.logical_date(now, 4) - dt.timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO time_exchange_requests (stage_id,logical_date,requester_name,units,"
+        "points_per_unit,minutes_per_unit,points_cost,minutes_requested,status,created_at) "
+        "VALUES (?,?, '浩哥',1,10,30,10,30,'pending',?)",
+        (sid, old_day, (now-dt.timedelta(days=1)).isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    client.get("/")
+    row = conn.execute("SELECT * FROM time_exchange_requests").fetchone()
+    assert row["status"] == "expired"

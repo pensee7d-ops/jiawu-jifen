@@ -207,6 +207,7 @@ def point_summary(conn, stage=None, window=None):
         "deducted": int(agg["deducted"]),
         "locked": locked,
         "projected": balance - locked,
+        "spendable": max(0, balance - locked),
         "goal": goal,
         "progress": min(100, max(0, int(balance / goal * 100))) if goal else 0,
     }

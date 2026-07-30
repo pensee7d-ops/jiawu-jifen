@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}阶段规则 · 家务勇者村{% endblock %}
 {% block content %}
-<span class="eyebrow">SEASON RULES</span><h1>阶段与结算规则</h1>
+<a class="admin-back" href="/admin">← 管理中心</a><span class="eyebrow">SEASON RULES</span><h1>阶段与结算规则</h1>
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
 <div class="notice"><b>假期切换方法</b><p>先创建但不启用假期阶段。假期开始时点“切换到此阶段”；结束后在原学期阶段点同一个按钮即可，不用修改学期日期。</p></div>
 <details class="pixel-card create-stage"><summary><b>＋ 创建新阶段</b><span>默认只保存，不立即启用</span></summary>
@@ -12,11 +12,12 @@
   <div class="form-grid"><label>结算模式<select name="mode" data-mode-select><option value="daily">每日结算</option><option value="weekly">指定星期窗口</option></select></label><label>逻辑日切换小时<input type="number" name="cutoff_hour" value="4" min="0" max="23"></label></div>
   <div class="form-grid" data-weekly-fields hidden><label>窗口开始<select name="window_start_weekday"><option value="0">周一</option><option value="1">周二</option><option value="2">周三</option><option value="3">周四</option><option value="4" selected>周五</option><option value="5">周六</option><option value="6">周日</option></select></label><label>窗口结束<select name="window_end_weekday"><option value="0" selected>周一</option><option value="1">周二</option><option value="2">周三</option><option value="3">周四</option><option value="4">周五</option><option value="5">周六</option><option value="6">周日</option></select></label></div>
   <div class="form-grid three"><label>目标积分<input type="number" name="points_goal" value="30" min="0"></label><label>基础分钟<input type="number" name="basic_minutes" value="120" min="0"></label><label>奖励分钟<input type="number" name="reward_minutes" value="120" min="0"></label></div>
+  <fieldset class="exchange-settings"><legend>额外积分兑换</legend><label class="check-label"><input type="checkbox" name="exchange_enabled" value="1">允许被管理者申请额外时长</label><div class="form-grid three"><label>每份积分<input type="number" name="exchange_points_per_unit" value="10" min="1"></label><label>每份分钟<input type="number" name="exchange_minutes_per_unit" value="30" min="1"></label><label>每日分钟上限<input type="number" name="exchange_daily_limit_minutes" value="60" min="0"><small>填 0 表示不限</small></label></div></fieldset>
   <button class="btn green">保存阶段</button>
 </form></details>
 <h2>已有阶段</h2>{% for s in stages %}<article class="pixel-card stage-card {{ 'active-stage' if s['active'] }}">
   <div><b>{{ s['name'] }}</b> {% if s['active'] %}<span class="status-badge">当前阶段</span>{% endif %} <span class="status-badge subtle">{{ '每日模式' if s['mode']=='daily' else '星期模式' }}</span></div>
-  <p>{{ s['starts_on'] }} → {{ s['ends_on'] }} · {{ s['points_goal'] }}分换{{ s['reward_minutes'] }}分钟 · 基础{{ s['basic_minutes'] }}分钟{% if s['mode']=='weekly' %} · 周{{ ['一','二','三','四','五','六','日'][s['window_start_weekday']] }}至周{{ ['一','二','三','四','五','六','日'][s['window_end_weekday']] }}{% endif %}</p>
+  <p>{{ s['starts_on'] }} → {{ s['ends_on'] }} · 达标 {{ s['points_goal'] }}分奖励{{ s['reward_minutes'] }}分钟 · 基础{{ s['basic_minutes'] }}分钟{% if s['mode']=='weekly' %} · 周{{ ['一','二','三','四','五','六','日'][s['window_start_weekday']] }}至周{{ ['一','二','三','四','五','六','日'][s['window_end_weekday']] }}{% endif %}</p><p class="muted">额外兑换：{% if s['exchange_enabled'] %}{{ s['exchange_points_per_unit'] }}分换{{ s['exchange_minutes_per_unit'] }}分钟 · 每日最多{{ s['exchange_daily_limit_minutes'] or '不限' }}分钟{% else %}未开放{% endif %}</p>
   {% if not s['active'] %}<form method="post" action="/admin/stages/{{ s['id'] }}/switch"><button class="btn green small" data-confirm="立即切换阶段？旧阶段当前窗口会在此刻结算。">切换到此阶段</button></form>{% endif %}
   <details><summary>编辑规则</summary><form method="post" action="/admin/stages" class="form-card">
     <input type="hidden" name="op" value="update"><input type="hidden" name="stage_id" value="{{ s['id'] }}">
@@ -25,6 +26,7 @@
     <div class="form-grid"><label>模式<select name="mode" data-mode-select><option value="daily" {{ 'selected' if s['mode']=='daily' }}>每日</option><option value="weekly" {{ 'selected' if s['mode']=='weekly' }}>星期窗口</option></select></label><label>切换小时<input type="number" name="cutoff_hour" value="{{ s['cutoff_hour'] }}" min="0" max="23"></label></div>
     <div class="form-grid" data-weekly-fields><label>窗口开始<select name="window_start_weekday">{% for d in range(7) %}<option value="{{ d }}" {{ 'selected' if s['window_start_weekday']==d }}>周{{ ['一','二','三','四','五','六','日'][d] }}</option>{% endfor %}</select></label><label>窗口结束<select name="window_end_weekday">{% for d in range(7) %}<option value="{{ d }}" {{ 'selected' if s['window_end_weekday']==d }}>周{{ ['一','二','三','四','五','六','日'][d] }}</option>{% endfor %}</select></label></div>
     <div class="form-grid three"><label>目标<input type="number" name="points_goal" value="{{ s['points_goal'] }}" min="0"></label><label>基础分钟<input type="number" name="basic_minutes" value="{{ s['basic_minutes'] }}" min="0"></label><label>奖励分钟<input type="number" name="reward_minutes" value="{{ s['reward_minutes'] }}" min="0"></label></div>
+    <fieldset class="exchange-settings"><legend>额外积分兑换</legend><label class="check-label"><input type="checkbox" name="exchange_enabled" value="1" {{ 'checked' if s['exchange_enabled'] }}>开放申请</label><div class="form-grid three"><label>每份积分<input type="number" name="exchange_points_per_unit" value="{{ s['exchange_points_per_unit'] }}" min="1"></label><label>每份分钟<input type="number" name="exchange_minutes_per_unit" value="{{ s['exchange_minutes_per_unit'] }}" min="1"></label><label>每日分钟上限<input type="number" name="exchange_daily_limit_minutes" value="{{ s['exchange_daily_limit_minutes'] }}" min="0"></label></div></fieldset>
     <button class="btn small">保存修改</button>
   </form></details>
 </article>{% else %}<div class="empty-state">◆<p>先创建阶段，再按需要手动切换启用</p></div>{% endfor %}

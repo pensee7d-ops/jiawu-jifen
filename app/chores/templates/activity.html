@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}冒险动态 · 家务勇者村{% endblock %}
+{% block content %}
+<section class="page-intro"><span class="eyebrow">ADVENTURE LOG</span><h1>冒险动态</h1><p>任务和日常打卡各自记账，在这里汇成一条清楚的时间线。</p></section>
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<section id="missions" class="active-quests">
+  <div class="section-head"><div><span class="eyebrow">ACTIVE QUESTS</span><h2>当前任务</h2></div>{% if role == 'supervisor' %}<a href="/admin/missions">发布与管理 →</a>{% endif %}</div>
+  {% for m in missions %}<article id="mission-{{ m['id'] }}" class="pixel-card quest-card status-{{ m['status'] }}">
+    <div class="quest-header"><span class="quest-mark">!</span><div><h2>{{ m['title'] }}</h2><span class="status-badge">{{ '待领取' if m['status']=='open' else '进行中' }}</span></div><b class="xp">+{{ m['points'] }} XP</b></div>
+    {% if m['description'] %}<p>{{ m['description'] }}</p>{% endif %}
+    <p class="muted">发布者 {{ m['published_by'] }}{% if m['deadline_at'] %} · 截止 {{ m['deadline_at'][:16].replace('T',' ') }}{% endif %}</p>
+    {% if m['rejection_reason'] %}<div class="notice error">上次驳回：{{ m['rejection_reason'] }}</div>{% endif %}
+    {% if role == 'checkin' and m['status']=='open' %}<form method="post" action="/missions/{{ m['id'] }}/claim"><button class="btn green wide">领取任务</button></form>{% endif %}
+    {% if role == 'checkin' and m['status']=='claimed' %}<form method="post" action="/missions/{{ m['id'] }}/submit" enctype="multipart/form-data" class="submission-form">
+      <textarea name="note" placeholder="说说你是怎么完成的"></textarea>
+      <fieldset class="photo-picker"><legend>完成照片{{ '（必需）' if m['photo_required'] else '（可选）' }}</legend><div class="photo-actions">
+        <label class="btn ghost file-button">📷 现场拍照<input class="photo-input" data-photo-group="mission-{{ m['id'] }}" data-preview="mission-preview-{{ m['id'] }}" type="file" name="photo_camera" accept="image/*" capture="environment"></label>
+        <label class="btn ghost file-button">▧ 从相册选择<input class="photo-input" data-photo-group="mission-{{ m['id'] }}" data-preview="mission-preview-{{ m['id'] }}" type="file" name="photo_album" accept="image/*"></label>
+      </div></fieldset>
+      <img id="mission-preview-{{ m['id'] }}" class="photo preview" alt="照片预览" hidden><button type="button" class="btn ghost small" data-clear-group="mission-{{ m['id'] }}" hidden>移除照片</button><button class="btn green">提交验收</button>
+    </form>{% endif %}
+  </article>{% else %}<div class="compact-empty"><span>!</span><p>当前没有需要处理的短期任务</p></div>{% endfor %}
+</section>
+<section class="timeline-section">
+  <div class="section-head feed-heading"><div><span class="eyebrow">DAILY TIMELINE</span><h2>当日记录</h2><small>逻辑日 {{ feed_date }} · 凌晨切换</small></div><a href="/history">旧周期历史</a></div>
+  <nav class="filter-tabs" aria-label="动态类型"><a class="{{ 'active' if kind=='all' }}" href="/activity?feed_date={{ feed_date }}&kind=all">全部</a><a class="{{ 'active' if kind=='checkin' }}" href="/activity?feed_date={{ feed_date }}&kind=checkin">日常打卡</a><a class="{{ 'active' if kind=='mission' }}" href="/activity?feed_date={{ feed_date }}&kind=mission">短期任务</a></nav>
+  <form method="get" action="/activity" class="date-nav pixel-card"><input type="hidden" name="kind" value="{{ kind }}">
+    {% if feed_prev %}<a class="btn ghost small" href="/activity?feed_date={{ feed_prev }}&kind={{ kind }}">← 前一天</a>{% else %}<span class="btn ghost small disabled">← 前一天</span>{% endif %}
+    <label><span class="sr-only">选择动态日期</span><input type="date" name="feed_date" value="{{ feed_date }}" min="{{ feed_min }}" max="{{ feed_max }}" onchange="this.form.submit()"></label>
+    {% if feed_next %}<a class="btn ghost small" href="/activity?feed_date={{ feed_next }}&kind={{ kind }}">后一天 →</a>{% else %}<span class="btn ghost small disabled">后一天 →</span>{% endif %}
+    {% if feed_date != feed_today %}<a class="text-link today-link" href="/activity?feed_date={{ feed_today }}&kind={{ kind }}">回到今天</a>{% endif %}
+  </form>
+  <div class="activity-timeline">
+  {% for item in items %}
+    {% if item.item_type == 'checkin' %}{% set f = item.checkin %}<article class="pixel-card feed-card timeline-card checkin-event"><span class="timeline-icon">✓</span><div class="event-kicker">日常打卡 · {{ item.occurred_at[:16].replace('T',' ') }}</div>
+      <h2>{% if f['kind']=='fixed' %}{{ f['task_name'] }}{% else %}{{ f['title'] }}{% endif %}</h2>
+      <span class="status-badge">{% if f['status']=='scored' %}{{ f['awarded_points'] }} 分{% elif f['status']=='pending' %}待审核 · 建议 {{ f['proposed_points'] }}{% else %}已驳回{% endif %}</span>
+      {% if f['mood'] or f['note'] %}<p>{{ f['mood'] or '' }} {{ f['note'] or '' }}</p>{% endif %}{% if f['photo_path'] %}<img class="photo" src="{{ f['photo_path'] }}" alt="打卡照片">{% endif %}
+      <div>{% for rc in f['reactions'] %}<span class="stamp">{{ rc['kind'] }}</span>{% endfor %}</div>{% for cm in f['comments'] %}<p class="muted"><b>{{ cm['author_name'] }}</b>：{{ cm['body'] }}</p>{% endfor %}
+      <form method="post" action="/checkin/{{ f['id'] }}/comment" class="inline-form"><input name="body" required placeholder="说点鼓励的话…"><button class="btn small">发送</button></form>
+      <form method="post" action="/checkin/{{ f['id'] }}/react" class="reaction-row">{% for emo in ['👍','⭐','🏅','🌸'] %}<button name="kind" value="{{ emo }}" class="stamp emoji-button">{{ emo }}</button>{% endfor %}</form>
+      {% if role == 'supervisor' %}<details class="danger-zone"><summary>记录管理</summary><form method="post" action="/admin/records/checkin/{{ f['id'] }}/trash" class="inline-form"><input type="hidden" name="return_to" value="/activity?feed_date={{ feed_date }}"><input name="reason" required placeholder="删除原因"><button class="btn red small">移入回收站</button></form></details>{% endif %}
+    </article>
+    {% else %}{% set m = item.mission %}<article class="pixel-card timeline-card mission-event"><span class="timeline-icon">!</span>
+      <div class="event-kicker">短期任务 · 最后更新 {{ item.occurred_at[:16].replace('T',' ') }}</div><div class="quest-header"><div><h2>{{ m['title'] }}</h2></div><span class="status-badge mission-state">{% if item.event_type=='published' %}新发布{% elif item.event_type=='claimed' %}进行中{% elif item.event_type=='submitted' %}待审核{% elif item.event_type=='approved' %}已完成{% elif item.event_type=='rejected' %}需重做{% else %}已更新{% endif %}</span></div>
+      <div class="mission-progress" aria-label="任务进度"><span class="done">发布</span><i>→</i><span class="{{ 'done' if 'claimed' in item.progress }}">领取</span><i>→</i><span class="{{ 'done' if 'submitted' in item.progress }}">提交</span><i>→</i><span class="{{ 'done rejected' if 'rejected' in item.progress else ('done' if 'approved' in item.progress else '') }}">{{ '驳回' if 'rejected' in item.progress else '通过' }}</span></div>
+      {% if m['submission_note'] %}<p>{{ m['submission_note'] }}</p>{% elif m['description'] %}<p>{{ m['description'] }}</p>{% endif %}{% if m['photo_path'] %}<img class="photo" src="{{ m['photo_path'] }}" alt="任务照片">{% endif %}{% if 'approved' in item.progress %}<p class="positive">获得 {{ m['awarded_points'] or m['points'] }} 积分</p>{% elif m['rejection_reason'] %}<p class="negative">原因：{{ m['rejection_reason'] }}</p>{% endif %}
+    </article>{% endif %}
+  {% else %}<div class="empty-state">◇<p>{{ feed_date }} 没有符合条件的动态</p></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS stages (
     points_goal INTEGER NOT NULL,
     basic_minutes INTEGER NOT NULL,
     reward_minutes INTEGER NOT NULL,
+    exchange_enabled INTEGER NOT NULL DEFAULT 0,
+    exchange_points_per_unit INTEGER NOT NULL DEFAULT 10,
+    exchange_minutes_per_unit INTEGER NOT NULL DEFAULT 30,
+    exchange_daily_limit_minutes INTEGER NOT NULL DEFAULT 60,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     created_by TEXT NOT NULL,
@@ -193,6 +197,27 @@ CREATE TABLE IF NOT EXISTS mission_submissions (
     reason TEXT,
     FOREIGN KEY(mission_id) REFERENCES missions(id)
 );
+CREATE TABLE IF NOT EXISTS time_exchange_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    logical_date TEXT NOT NULL,
+    requester_name TEXT NOT NULL,
+    units INTEGER NOT NULL,
+    points_per_unit INTEGER NOT NULL,
+    minutes_per_unit INTEGER NOT NULL,
+    points_cost INTEGER NOT NULL,
+    minutes_requested INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    review_reason TEXT,
+    point_ledger_id INTEGER,
+    time_grant_id INTEGER,
+    FOREIGN KEY(stage_id) REFERENCES stages(id),
+    FOREIGN KEY(point_ledger_id) REFERENCES point_ledger(id),
+    FOREIGN KEY(time_grant_id) REFERENCES time_grants(id)
+);
 CREATE TABLE IF NOT EXISTS record_deletions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_type TEXT NOT NULL,
@@ -218,6 +243,7 @@ CREATE TABLE IF NOT EXISTS stage_switches (
 CREATE INDEX IF NOT EXISTS idx_point_ledger_created ON point_ledger(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_time_grants_date ON time_grants(logical_date);
 CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_exchange_status ON time_exchange_requests(status, logical_date, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deletions_active ON record_deletions(restored_at, purged_at, purge_after);
 """
 
@@ -282,6 +308,15 @@ def migrate(conn: sqlite3.Connection) -> None:
     stage_cols = {r["name"] for r in conn.execute("PRAGMA table_info(stages)")}
     if stage_cols and "activated_at" not in stage_cols:
         conn.execute("ALTER TABLE stages ADD COLUMN activated_at TEXT")
+    stage_additions = {
+        "exchange_enabled": "INTEGER NOT NULL DEFAULT 0",
+        "exchange_points_per_unit": "INTEGER NOT NULL DEFAULT 10",
+        "exchange_minutes_per_unit": "INTEGER NOT NULL DEFAULT 30",
+        "exchange_daily_limit_minutes": "INTEGER NOT NULL DEFAULT 60",
+    }
+    for name, sql_type in stage_additions.items():
+        if stage_cols and name not in stage_cols:
+            conn.execute(f"ALTER TABLE stages ADD COLUMN {name} {sql_type}")
 
     # 只迁移当前开放旧周期；归档周期仍可在旧历史页面查看，但不进入余额。
     have_periods = conn.execute(

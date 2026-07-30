@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}任务管理 · 家务勇者村{% endblock %}
 {% block content %}
-<span class="eyebrow">QUEST CONTROL</span><h1>发布与审核任务</h1>
+<a class="admin-back" href="/admin">← 管理中心</a><span class="eyebrow">QUEST CONTROL</span><h1>发布与管理任务</h1>
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
 <form method="post" action="/admin/missions" class="pixel-card form-card">
   <h2>发布新任务</h2>
@@ -17,11 +17,7 @@
   <div class="quest-header"><div><b>{{ m['title'] }}</b><small>{{ m['status'] }} · {{ m['published_by'] }}</small></div><b class="xp">{{ m['points'] }} XP</b></div>
   {% if m['submission_note'] %}<p>{{ m['submission_note'] }}</p>{% endif %}
   {% if m['photo_path'] %}<img class="photo" src="{{ m['photo_path'] }}" alt="完成照片">{% endif %}
-  {% if m['status']=='submitted' %}<form method="post" action="/admin/missions/{{ m['id'] }}/review">
-    <label>最终积分<input type="number" name="points" value="{{ m['points'] }}"></label>
-    <label>驳回原因<input name="reason" placeholder="驳回时填写"></label>
-    <div class="button-row"><button class="btn green" name="action" value="approve">通过并计分</button><button class="btn red" name="action" value="reject">驳回重做</button></div>
-  </form>{% endif %}
+  {% if m['status']=='submitted' %}<a class="btn green" href="/admin/reviews?kind=mission#mission-{{ m['id'] }}">前往统一审核</a>{% endif %}
   {% if m['status']=='open' %}<details><summary>编辑任务</summary><form method="post" action="/admin/missions/{{ m['id'] }}/edit">
     <label>标题<input name="title" value="{{ m['title'] }}" required></label>
     <label>说明<textarea name="description">{{ m['description'] or '' }}</textarea></label>

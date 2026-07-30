@@ -11,21 +11,28 @@
 <div class="sky-pixels" aria-hidden="true"></div>
 <div class="wrap">
   {% if request.session.get('role') %}
+  {% set role = request.session.get('role') %}
+  {% set alerts = pending_counts() if role == 'supervisor' else {'total': 0} %}
   <header class="topbar">
     <a class="brand" href="/"><span class="brand-gem">◆</span> 家务勇者村</a>
-    <span class="player-tag">{{ request.session.get('name','玩家') }}</span>
+    <div class="top-actions">
+      {% if role == 'supervisor' %}<a class="alert-bell {{ 'has-alerts' if alerts.total }}" href="/admin/reviews" aria-label="{{ alerts.total }} 项待办">◆{% if alerts.total %}<b>{{ alerts.total }}</b>{% endif %}</a>{% endif %}
+      <details class="account-menu"><summary><span class="account-avatar">{{ request.session.get('name','玩')[0] }}</span><span>{{ request.session.get('name','玩家') }}</span></summary>
+        <div class="account-popover"><b>{{ request.session.get('name','玩家') }}</b><small>{{ '管理者' if role == 'supervisor' else '被管理者' }}</small><a href="/logout">退出登录</a></div>
+      </details>
+    </div>
   </header>
   {% endif %}
   <main>{% block content %}{{ body }}{% endblock %}</main>
 </div>
 {% if request.session.get('role') %}
+{% set role = request.session.get('role') %}{% set alerts = pending_counts() if role == 'supervisor' else {'total': 0} %}
 <nav class="bottom-nav" aria-label="主导航">
-  <a href="/"><span>⌂</span>看板</a>
-  <a href="/missions"><span>!</span>任务</a>
-  {% if request.session.get('role') == 'checkin' %}<a href="/checkin"><span>＋</span>打卡</a>
-  {% else %}<a href="/admin/trash"><span>⚙</span>管理</a>{% endif %}
-  <a href="/points"><span>◇</span>账本</a>
-  <a href="/computer/history"><span>▣</span>电脑</a>
+  <a href="/" class="{{ 'active' if request.url.path == '/' }}"><span>⌂</span>首页</a>
+  <a href="/activity" class="{{ 'active' if request.url.path == '/activity' }}"><span>◈</span>动态</a>
+  {% if role == 'checkin' %}<a href="/checkin" class="{{ 'active' if request.url.path == '/checkin' }}"><span>＋</span>打卡</a>
+  {% else %}<a href="/admin" class="nav-with-badge {{ 'active' if request.url.path.startswith('/admin') }}"><span>⚙</span>管理{% if alerts.total %}<b>{{ alerts.total }}</b>{% endif %}</a>{% endif %}
+  <a href="/computer" class="{{ 'active' if request.url.path == '/computer' }}"><span>▣</span>电脑</a>
 </nav>
 {% endif %}
 <script>

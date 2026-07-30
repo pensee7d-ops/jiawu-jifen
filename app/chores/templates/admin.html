@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}管理中心 · 家务勇者村{% endblock %}
+{% block content %}
+<section class="admin-hero"><span class="eyebrow">COMMAND CENTER</span><h1>管理中心</h1><p>审核放在最前，日常操作按用途归位。</p></section>
+<section class="admin-group priority-group"><div class="section-head"><div><span class="eyebrow">ACTION REQUIRED</span><h2>待办审批</h2></div><span class="count-chip">{{ pending.total }} 项</span></div>
+  <div class="admin-tile-grid">
+    <a href="/admin/reviews?kind=checkin" class="admin-tile {{ 'urgent' if pending.checkin }}"><span class="tile-icon">✓</span><div><b>自由打卡</b><small>确认清单外打卡积分</small></div><strong>{{ pending.checkin }}</strong></a>
+    <a href="/admin/reviews?kind=mission" class="admin-tile {{ 'urgent' if pending.mission }}"><span class="tile-icon">!</span><div><b>任务验收</b><small>检查完成说明和照片</small></div><strong>{{ pending.mission }}</strong></a>
+    <a href="/admin/reviews?kind=time_exchange" class="admin-tile {{ 'urgent' if pending.time_exchange }}"><span class="tile-icon">▣</span><div><b>时长兑换</b><small>一次完成积分扣减与加时</small></div><strong>{{ pending.time_exchange }}</strong></a>
+  </div>
+</section>
+<section class="admin-group"><span class="eyebrow">DAILY OPERATIONS</span><h2>日常管理</h2><div class="admin-tile-grid">
+  <a href="/admin/missions" class="admin-tile"><span class="tile-icon">＋</span><div><b>发布任务</b><small>创建、编辑和取消短期任务</small></div><i>→</i></a>
+  <a href="/admin/catalog" class="admin-tile"><span class="tile-icon">≡</span><div><b>固定打卡目录</b><small>维护日常家务和默认积分</small></div><i>→</i></a>
+  <a href="/computer?tab=manage" class="admin-tile"><span class="tile-icon">▣</span><div><b>电脑管理</b><small>额度、补录、更正和审计</small></div><i>→</i></a>
+  <a href="/admin/points" class="admin-tile"><span class="tile-icon">◇</span><div><b>积分调整</b><small>加扣分与最近账本</small></div><i>→</i></a>
+  <a href="/admin/announcement" class="admin-tile"><span class="tile-icon">※</span><div><b>村庄公告</b><small>维护首页通知内容</small></div><i>→</i></a>
+</div></section>
+<section class="admin-group"><span class="eyebrow">RULES & AUDIT</span><h2>阶段与审计</h2><div class="admin-tile-grid">
+  <a href="/admin/stages" class="admin-tile"><span class="tile-icon">◆</span><div><b>阶段规则</b><small>结算、基础额度和兑换规则</small></div><i>→</i></a>
+  <a href="/points" class="admin-tile"><span class="tile-icon">⌁</span><div><b>完整积分账本</b><small>按来源追溯所有积分</small></div><i>→</i></a>
+  <a href="/computer?tab=audit" class="admin-tile"><span class="tile-icon">◫</span><div><b>电脑审计</b><small>查看记录更正历史</small></div><i>→</i></a>
+  <a href="/admin/trash" class="admin-tile quiet"><span class="tile-icon">♲</span><div><b>回收站</b><small>恢复七天内删除的记录</small></div><i>→</i></a>
+</div></section>
+{% endblock %}

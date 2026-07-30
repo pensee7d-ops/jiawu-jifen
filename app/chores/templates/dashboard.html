@@ -1,80 +1,42 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero">
-  <div><span class="eyebrow">PLAYER STATUS</span><h1>积分冒险看板</h1>
-    <p>{{ stage['name'] if stage else '等待创建新阶段' }} · {{ '管理模式' if role == 'supervisor' else '勇者模式' }}</p>
+<section class="hero status-hero">
+  <div><span class="eyebrow">HOME STATUS</span><h1>今日状态</h1>
+    <p>{{ stage['name'] if stage else '暂未启用阶段' }} · {{ '管理者视角' if role == 'supervisor' else '勇者视角' }}</p>
   </div>
-  <div class="level-orb"><small>余额</small><b>{{ points.balance }}</b></div>
+  <a class="level-orb" href="/points"><small>积分余额</small><b>{{ points.balance }}</b></a>
 </section>
-{% if not stage %}<div class="notice warning">当前还没有生效阶段。积分会正常记录，但暂不自动发放电脑时长。
-  {% if role == 'supervisor' %}<a href="/admin/stages">立即配置 →</a>{% endif %}</div>{% endif %}
+{% if role == 'supervisor' and pending.total %}
+<section class="attention-banner"><div><span class="attention-pulse"></span><b>有 {{ pending.total }} 项等待处理</b><p>打卡 {{ pending.checkin }} · 任务 {{ pending.mission }} · 时长兑换 {{ pending.time_exchange }}</p></div><a class="btn" href="/admin/reviews">立即审核 →</a></section>
+{% endif %}
+{% if not stage %}<div class="notice warning">当前没有生效阶段。积分仍会记录，但不会自动发放电脑额度。{% if role == 'supervisor' %}<a href="/admin/stages">配置阶段 →</a>{% endif %}</div>{% endif %}
 <section class="stat-grid">
-  <article class="pixel-card score-card">
+  <a href="/points" class="pixel-card score-card status-link-card">
     <div class="card-title"><span>◇</span> 积分能量</div>
     <div class="score-line"><b>{{ points.balance }}</b><span>/ {{ points.goal or goal }}</span></div>
     <div class="pixel-bar"><i style="width:{{ points.progress if stage else progress }}%"></i></div>
-    <div class="mini-stats"><span>累计赚取 <b>+{{ points.earned }}</b></span><span>累计扣减 <b>-{{ points.deducted }}</b></span></div>
-    {% if points.locked %}<p class="locked">🔒 待结算 {{ points.locked }} 分 · 预计结转 {{ points.projected }}</p>{% endif %}
-    <p class="legacy muted">第 {{ period_seq }} 期 · 本周期累计 {{ period_total }} · 今日分 {{ today_total }} · 本周期进度 {{ period_total }}/{{ goal }}</p>
-  </article>
+    <div class="mini-stats"><span>可兑换 <b>{{ points.spendable }}</b></span><span>待结算 <b>{{ points.locked }}</b></span></div>
+    <small class="card-route">查看完整积分账本 →</small>
+  </a>
   <article id="computer-live" data-used="{{ computer.used }}" data-allowance="{{ computer.allowance }}" data-running="{{ 1 if computer.open_session else 0 }}" class="pixel-card computer-card {{ 'danger-card' if computer.overrun else '' }}">
-    <div class="card-title"><span>▣</span> 今日电脑使用</div>
-    <div class="computer-status"><span class="status-dot {{ 'online' if computer.open_session else '' }}"></span>
-      {{ '使用中' if computer.open_session else '未开机' }}</div>
+    <div class="card-title"><span>▣</span> 今日电脑</div>
+    <div class="computer-status"><span class="status-dot {{ 'online' if computer.open_session else '' }}"></span>{{ '使用中' if computer.open_session else '未开机' }}</div>
     <div class="time-line"><b id="computer-primary">{{ computer.remaining if not computer.overrun else computer.overrun }}</b><span id="computer-label">分钟{{ '超时' if computer.overrun else '剩余' }}</span></div>
-    <p class="muted">额度 {{ computer.allowance }} 分钟 · 已用 <span id="computer-used">{{ computer.used }}</span> 分钟 · 共 {{ comp_seg }} 段</p>
-    {% if role == 'checkin' %}<div class="button-row">
-      <form method="post" action="/computer/on"><button class="btn green">▶ 开机</button></form>
-      <form method="post" action="/computer/off"><button class="btn red">■ 关机</button></form>
-    </div>{% else %}<a class="text-link" href="/admin/computer">管理记录与额度 →</a>{% endif %}
+    <p class="muted">额度 {{ computer.allowance }} · 已用 <span id="computer-used">{{ computer.used }}</span> · {{ comp_seg }} 段记录</p>
+    {% if role == 'checkin' %}<div class="button-row home-computer-actions"><form method="post" action="/computer/on"><input type="hidden" name="return_to" value="/"><button class="btn green" {{ 'disabled' if computer.open_session }}>▶ 开机</button></form><form method="post" action="/computer/off"><input type="hidden" name="return_to" value="/"><button class="btn red" {{ 'disabled' if not computer.open_session }}>■ 关机</button></form></div>{% endif %}
+    <a class="card-route" href="/computer">查看记录、额度与兑换 →</a>
   </article>
 </section>
-{% if missions %}<section><div class="section-head"><h2>任务雷达</h2><a href="/missions">查看全部 →</a></div>
-  <div class="mission-strip">{% for m in missions %}<article class="mission-mini">
-    <span class="quest-mark">!</span><div><b>{{ m['title'] }}</b><small>{{ m['points'] }} XP · {{ m['status'] }}</small></div>
-  </article>{% endfor %}</div></section>{% endif %}
-{% if announcement %}<div class="notice"><b>📜 村庄公告</b><p>{{ announcement }}</p></div>{% endif %}
-{% if role == 'supervisor' %}<section class="admin-dock"><h2>管理中心</h2><div class="action-grid">
-  <a href="/admin/missions">发布 / 审核任务</a><a href="/review">审核自由打卡</a>
-  <a href="/admin/stages">阶段规则</a><a href="/admin/computer">电脑记录</a>
-  <a href="/admin/catalog">固定任务</a><a href="/admin/announcement">村庄公告</a><a href="/admin/trash">回收站</a>
-</div></section>{% endif %}
-<div class="section-head feed-heading"><div><h2>冒险动态</h2><small class="muted">逻辑日 {{ feed_date }} · 凌晨 4 点切换</small></div><a href="/history">旧周期历史</a></div>
-<form method="get" action="/" class="date-nav pixel-card">
-  {% if feed_prev %}<a class="btn ghost small" href="/?feed_date={{ feed_prev }}">← 前一天</a>{% else %}<span class="btn ghost small disabled">← 前一天</span>{% endif %}
-  <label><span class="sr-only">选择动态日期</span><input type="date" name="feed_date" value="{{ feed_date }}" min="{{ feed_min }}" max="{{ feed_max }}" onchange="this.form.submit()"></label>
-  {% if feed_next %}<a class="btn ghost small" href="/?feed_date={{ feed_next }}">后一天 →</a>{% else %}<span class="btn ghost small disabled">后一天 →</span>{% endif %}
-  {% if feed_date != feed_today %}<a class="text-link today-link" href="/?feed_date={{ feed_today }}">回到今天</a>{% endif %}
-</form>
-{% for f in feed %}
-<article class="pixel-card feed-card">
-  <div class="muted">{{ f["created_at"][:16].replace("T"," ") }} ·
-    {% if f["kind"]=="fixed" %}{{ f["task_name"] }}
-    {% else %}{{ f["title"] }}{% endif %}
-    · {% if f["status"]=="scored" %}<b>{{ f["awarded_points"] }} 分</b>
-      {% elif f["status"]=="pending" %}<span style="color:#e67e22">待定（建议 {{ f["proposed_points"] }}）</span>
-      {% else %}<span style="color:#c0392b">已驳回</span>{% endif %}</div>
-  {% if f["mood"] %}<p>{{ f["mood"] }}</p>{% endif %}
-  {% if f["note"] %}<p>{{ f["note"] }}</p>{% endif %}
-  {% if f["photo_path"] %}<img class="photo" src="{{ f['photo_path'] }}">{% endif %}
-  <div>{% for rc in f["reactions"] %}<span class="stamp">{{ rc["kind"] }}</span>{% endfor %}</div>
-  {% for cm in f["comments"] %}
-    <p class="muted"><b>{{ cm["author_name"] }}</b>：{{ cm["body"] }}</p>
-  {% endfor %}
-  <form method="post" action="/checkin/{{ f['id'] }}/comment" class="inline-form">
-    <input type="text" name="body" placeholder="说点鼓励的话…">
-    <button class="btn small">发送</button>
-  </form>
-  <form method="post" action="/checkin/{{ f['id'] }}/react">
-    {% for emo in ['👍','⭐','🏅','🌸'] %}
-      <button name="kind" value="{{ emo }}" class="stamp"
-        style="background:none;color:inherit">{{ emo }}</button>
-    {% endfor %}
-  </form>
-  {% if role == 'supervisor' %}<details class="danger-zone"><summary>删除这条记录</summary><form method="post" action="/admin/records/checkin/{{ f['id'] }}/trash" class="inline-form"><input type="hidden" name="return_to" value="/?feed_date={{ feed_date }}"><input name="reason" required placeholder="填写删除原因"><button class="btn red small" data-confirm="记录和关联积分将移入回收站，确定继续？">移入回收站</button></form></details>{% endif %}
-</article>
-{% else %}<div class="empty-state">◇<p>{{ feed_date }} 没有冒险动态</p></div>{% endfor %}
-<p class="page-actions"><a href="/logout">退出登录</a></p>
+<section class="today-glance">
+  <div class="section-head"><div><span class="eyebrow">TODAY AT A GLANCE</span><h2>今日概况</h2></div><a href="/activity">进入冒险动态 →</a></div>
+  <div class="glance-grid">
+    <a href="/activity?kind=checkin" class="glance-item"><span>✓</span><b>{{ today_checkins }}</b><small>今日打卡</small></a>
+    <a href="/activity#missions" class="glance-item"><span>!</span><b>{{ active_missions|length }}</b><small>当前任务</small></a>
+    <div class="glance-item"><span>◆</span><b>{{ stage['name'] if stage else '未设置' }}</b><small>当前阶段</small></div>
+  </div>
+</section>
+{% if active_missions %}<section class="mission-summary"><div class="section-head"><h2>任务信号</h2><a href="/activity#missions">查看并处理 →</a></div>{% for m in active_missions %}<a href="/activity#mission-{{ m['id'] }}" class="mission-mini"><span class="quest-mark">!</span><div><b>{{ m['title'] }}</b><small>+{{ m['points'] }} XP · {% if m['status']=='open' %}待领取{% elif m['status']=='claimed' %}进行中{% else %}待审核{% endif %}</small></div></a>{% endfor %}</section>{% endif %}
+{% if announcement %}<div class="notice village-note"><b>村庄公告</b><p>{{ announcement }}</p></div>{% endif %}
 <script>
 (function () {
   var card = document.getElementById('computer-live');
