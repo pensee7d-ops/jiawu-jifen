@@ -151,9 +151,10 @@ def test_dashboard_shows_week_and_today_totals(client):
     )
     r = client.get("/")
     assert r.status_code == 200
-    assert "今日概况" in r.text
-    assert "今日电脑" in r.text
-    assert "今日打卡" in r.text
+    assert "今日电脑时间" in r.text
+    assert "本周积分目标" in r.text
+    assert "今天的任务" in r.text
+    assert "今日获得" in r.text and "今日已用" in r.text and "今日剩余" in r.text
     assert "10" in r.text  # 全屋吸尘 10 分
 
 
@@ -284,14 +285,12 @@ def test_set_announcement(client):
 
 def test_supervisor_sets_period_goal_reflected_on_dashboard(client):
     _sup(client)
-    # 默认目标 80
     r = client.get("/")
-    assert "/ 80" in r.text
-    # 改成 50，无需重启/发版
+    assert "历史余额" in r.text
     r = client.post("/admin/announcement", data={"body": "", "goal": "50"})
     assert r.status_code == 303
     r = client.get("/")
-    assert "/ 50" in r.text
+    assert "本周积分目标" in r.text
     assert client.app.state.conn.execute(
         "SELECT value FROM settings WHERE key='period_goal'"
     ).fetchone()["value"] == "50"
@@ -336,9 +335,9 @@ def test_archive_closes_period_and_history_keeps_it(client):
     assert r.status_code == 200 and "第 1 期" in r.text
     r = client.post("/archive")
     assert r.status_code == 303 and r.headers["location"] == "/"
-    # 新周期已创建；首页只展示状态，不再混入旧周期管理信息
+    # 新周期已创建；首页只展示当前行动信息，不再混入旧周期管理信息
     r = client.get("/")
-    assert "今日状态" in r.text
+    assert "本周运行状态" in r.text
     conn = client.app.state.conn
     periods = conn.execute(
         "SELECT * FROM periods ORDER BY id").fetchall()
@@ -506,13 +505,55 @@ def test_home_and_activity_show_weekly_rule_progress(client):
 
     home = client.get("/")
     assert home.status_code == 200
-    assert "本周规则进度" in home.text
-    assert "周六" in home.text and "3 小时 30 分" in home.text
+    assert "本周积分目标" in home.text
+    assert "本周已获得" in home.text
+    assert "WEEKLY QUEST" not in home.text and "本周规则进度" not in home.text
     assert "今日获得" in home.text and "今日已用" in home.text
 
     activity = client.get(f"/activity?cycle_id={cycle['id']}")
     assert activity.status_code == 200
     assert f"cycle_id={cycle['id']}" in activity.text
+
+
+def test_admin_rule_timeline_and_effective_scope_preserve_cycle_snapshot(client):
+    _sup(client)
+    stage = _create_weekly_template(client, "生效范围模板")
+    client.post(f"/admin/stages/{stage['id']}/switch")
+    conn = client.app.state.conn
+    cycle = conn.execute(
+        "SELECT * FROM weekly_cycles WHERE stage_id=? ORDER BY id DESC LIMIT 1", (stage["id"],),
+    ).fetchone()
+    sunday = conn.execute(
+        "SELECT * FROM daily_rules WHERE stage_id=? AND weekday=6", (stage["id"],),
+    ).fetchone()
+
+    page = client.get(f"/admin/stages?stage_id={stage['id']}")
+    assert page.status_code == 200
+    assert "周一到周日" in page.text
+    assert "本周立即采用" in page.text
+    assert "规则变更审计" in page.text
+
+    old_snapshot = cycle["rules_json"]
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "rule_id": sunday["id"], "op": "update", "weekday": "6",
+        "condition_type": "week_total", "points_threshold": "75", "reward_minutes": "150", "ends_cycle": "1",
+        "effective_scope": "next_cycle",
+    })
+    assert response.status_code == 303
+    assert conn.execute("SELECT rules_json FROM weekly_cycles WHERE id=?", (cycle["id"],)).fetchone()[0] == old_snapshot
+
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "rule_id": sunday["id"], "op": "update", "weekday": "6",
+        "condition_type": "week_total", "points_threshold": "76", "reward_minutes": "150", "ends_cycle": "1",
+        "effective_scope": "current_cycle",
+    })
+    assert response.status_code == 303
+    snapshot = conn.execute("SELECT rules_json FROM weekly_cycles WHERE id=?", (cycle["id"],)).fetchone()[0]
+    assert '"points_threshold": 76' in snapshot
+    event = conn.execute(
+        "SELECT * FROM rule_change_events WHERE stage_id=? ORDER BY id DESC LIMIT 1", (stage["id"],),
+    ).fetchone()
+    assert event["effective_scope"] == "current_cycle"
 
 
 def test_stage_and_mission_flow_awards_points_once(client):
@@ -711,7 +752,7 @@ def test_feed_uses_logical_date_and_clamps_future(client):
 def test_supervisor_home_is_status_only_and_admin_has_real_management(client):
     _sup(client)
     home = client.get("/")
-    assert "今日状态" in home.text
+    assert "本周运行状态" in home.text
     assert "COMMAND CENTER" not in home.text
     assert "home-computer-actions" not in home.text
     assert 'href="/admin"' in home.text
@@ -757,7 +798,7 @@ def test_pending_badges_combine_checkin_mission_and_exchange(client):
     client.get("/logout")
     _sup(client)
     home = client.get("/")
-    assert "有 3 项等待处理" in home.text
+    assert "3 项等待处理" in home.text
     admin = client.get("/admin")
     assert "待验收任务" not in admin.text
     reviews = client.get("/admin/reviews")

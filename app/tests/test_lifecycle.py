@@ -163,3 +163,40 @@ def test_sunday_miss_closes_at_monday_cutoff_and_next_cycle_opens(tmp_path):
     cycles = conn.execute("SELECT * FROM weekly_cycles ORDER BY start_at").fetchall()
     assert len(cycles) == 2
     assert cycles[0]["status"] == "completed" and cycles[1]["status"] == "open"
+
+
+def test_weekly_summary_exposes_progressive_targets(tmp_path):
+    conn = _conn(tmp_path)
+    stage_id = _weekly_stage(conn)
+    stage = conn.execute("SELECT * FROM stages WHERE id=?", (stage_id,)).fetchone()
+    now = dt.datetime(2026, 7, 4, 9)
+    lifecycle.ensure_state(conn, now)
+
+    initial = weekly.summary(conn, stage, now)["progression"]
+    assert initial["points"] == 0
+    assert [target["threshold"] for target in initial["targets"]] == [40, 70]
+    assert initial["next"]["threshold"] == 40 and initial["remaining"] == 40
+
+    lifecycle.add_points(conn, 40, "earn", "周末任务", "test", "progress-40", "浩哥", now.isoformat())
+    conn.commit()
+    lifecycle.ensure_state(conn, now)
+    progressed = weekly.summary(conn, stage, now)["progression"]
+    assert progressed["targets"][0]["status"] == "unlocked"
+    assert progressed["next"]["threshold"] == 70 and progressed["remaining"] == 30
+
+
+def test_current_cycle_rule_update_keeps_unlocked_grants_untouched(tmp_path):
+    conn = _conn(tmp_path)
+    stage_id = _weekly_stage(conn)
+    stage = conn.execute("SELECT * FROM stages WHERE id=?", (stage_id,)).fetchone()
+    friday = dt.datetime(2026, 7, 3, 9)
+    lifecycle.ensure_state(conn, friday)
+    friday_rule = conn.execute(
+        "SELECT * FROM daily_rules WHERE stage_id=? AND weekday=4", (stage_id,),
+    ).fetchone()
+    before = dict(friday_rule)
+    after = {**before, "weekday": 5, "condition_type": "week_total", "points_threshold": 40,
+             "reward_minutes": 10, "ends_cycle": 0, "active": 1}
+    assert not weekly.apply_current_cycle_rule(conn, stage_id, friday_rule["id"], before, after, "惠姐", friday)
+    assert _grant_minutes(conn, "2026-07-03") == 150
+    assert weekly.summary(conn, stage, friday)["rules"][0]["reward_minutes"] == 150

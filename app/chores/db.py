@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS cycle_events (
     occurred_at TEXT NOT NULL,
     description TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rule_change_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    rule_id INTEGER,
+    actor_name TEXT NOT NULL,
+    effective_scope TEXT NOT NULL,
+    before_json TEXT NOT NULL,
+    after_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(stage_id) REFERENCES stages(id),
+    FOREIGN KEY(rule_id) REFERENCES daily_rules(id)
+);
 CREATE TABLE IF NOT EXISTS daily_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stage_id INTEGER NOT NULL,

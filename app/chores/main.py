@@ -1,5 +1,6 @@
 import os
 import datetime as dt
+import json
 import uuid
 import asyncio
 import logging
@@ -1046,7 +1047,7 @@ def create_app() -> FastAPI:
         return RedirectResponse("/admin/reviews?kind=mission", status_code=303)
 
     @app.get("/admin/stages", response_class=HTMLResponse)
-    def stages_page(request: Request, error: str = "", stage_id: str = ""):
+    def stages_page(request: Request, error: str = "", stage_id: str = "", edit_day: str = ""):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
         rows = [dict(row) for row in conn.execute(
@@ -1060,10 +1061,39 @@ def create_app() -> FastAPI:
             "SELECT * FROM daily_rules WHERE stage_id=? ORDER BY sort_order,weekday,id",
             (selected["id"],),
         )] if selected else []
+        try:
+            selected_day = int(edit_day) if edit_day else 4
+        except ValueError:
+            selected_day = 4
+        selected_day = selected_day if 0 <= selected_day <= 6 else 4
+        now = _now()
+        week = weekly.summary(conn, selected, now)
+        visible_by_day = {}
+        for rule in rules:
+            existing = visible_by_day.get(rule["weekday"])
+            if existing is None or (rule["active"] and not existing["active"]):
+                visible_by_day[rule["weekday"]] = rule
+        cycle_rules = {rule["id"]: rule for rule in week["rules"]} if week and week.get("cycle") else {}
+        template_timeline = []
+        for weekday in range(7):
+            rule = visible_by_day.get(weekday)
+            cycle_rule = cycle_rules.get(rule["id"]) if rule else None
+            template_timeline.append({
+                "weekday": weekday,
+                "rule": rule,
+                "execution": cycle_rule["execution"] if cycle_rule else None,
+            })
+        editing_rule = visible_by_day.get(selected_day)
+        change_events = conn.execute(
+            "SELECT * FROM rule_change_events WHERE stage_id=? ORDER BY id DESC LIMIT 30",
+            (selected["id"],),
+        ).fetchall() if selected else []
         return templates.TemplateResponse(request, "stages_admin.html", {
             "request": request, "stages": rows, "selected": selected, "daily_rules": rules,
-            "error": error, "week": weekly.summary(conn, selected, _now()),
-            "today": _now().date().isoformat(),
+            "error": error, "week": week, "today": now.date().isoformat(),
+            "selected_day": selected_day, "editing_rule": editing_rule,
+            "template_timeline": template_timeline,
+            "rule_change_events": change_events,
             "switches": conn.execute(
                 "SELECT x.*,o.name AS old_name,n.name AS new_name FROM stage_switches x "
                 "LEFT JOIN stages o ON o.id=x.old_stage_id JOIN stages n ON n.id=x.new_stage_id "
@@ -1111,7 +1141,7 @@ def create_app() -> FastAPI:
                     "basic_minutes,reward_minutes,active,created_at,created_by) "
                     "VALUES (?,?,?,'rules',?,0,0,0,0,?,?)",
                     (name.strip(), starts_on, ends_on, cutoff, now.isoformat(timespec="seconds"),
-                     auth.current_name(request)),
+                     auth.current_name(request) or "监管者"),
                 ).lastrowid
                 weekly.install_template(conn, sid, now, int(auto_renew == "1"))
             conn.execute(
@@ -1127,6 +1157,7 @@ def create_app() -> FastAPI:
         stage_id: str = Form(""), weekday: str = Form("4"),
         condition_type: str = Form("none"), points_threshold: str = Form("0"),
         reward_minutes: str = Form("0"), ends_cycle: str = Form("0"),
+        effective_scope: str = Form("next_cycle"),
     ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
@@ -1137,6 +1168,8 @@ def create_app() -> FastAPI:
                 raise ValueError("周期模板不存在")
             if op not in ("add", "update", "disable", "enable", "copy", "up", "down"):
                 raise ValueError("未知操作")
+            if effective_scope not in ("next_cycle", "current_cycle"):
+                raise ValueError("生效范围不合法")
             if not 0 <= day <= 6 or threshold < 0 or minutes < 0:
                 raise ValueError("星期、积分或分钟不合法")
             if condition_type not in ("none", "week_total", "day_total"):
@@ -1147,6 +1180,8 @@ def create_app() -> FastAPI:
             old = next((rule for rule in rules if rule["id"] == rid), None)
             if op != "add" and old is None:
                 raise ValueError("规则不存在或不属于该模板")
+            if effective_scope == "current_cycle" and op != "update":
+                raise ValueError("本周立即采用只支持修改尚未执行的现有规则")
             if op in ("up", "down"):
                 position = rules.index(old)
                 target = position + (-1 if op == "up" else 1)
@@ -1168,7 +1203,8 @@ def create_app() -> FastAPI:
                              "sort_order": old["sort_order"] if old else len(rules)}
             proposed = [rule for rule in rules if rule["id"] != candidate["id"]] + [candidate]
             weekly.validate_rules(proposed)
-            stamp = _now().isoformat(timespec="seconds")
+            now = _now()
+            stamp = now.isoformat(timespec="seconds")
             values = (candidate["weekday"], candidate["condition_type"], candidate["points_threshold"],
                       candidate["reward_minutes"], candidate["ends_cycle"], candidate["active"],
                       candidate["sort_order"], stamp)
@@ -1179,15 +1215,29 @@ def create_app() -> FastAPI:
                         "ends_cycle=?,active=?,sort_order=?,updated_at=? WHERE id=? AND stage_id=?",
                         values + (candidate["id"], sid),
                     )
+                    stored_rule_id = candidate["id"]
                 else:
-                    conn.execute(
+                    stored_rule_id = conn.execute(
                         "INSERT INTO daily_rules(weekday,condition_type,points_threshold,reward_minutes,"
                         "ends_cycle,active,sort_order,updated_at,stage_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                         values + (sid, stamp),
-                    )
+                    ).lastrowid
+                if effective_scope == "current_cycle":
+                    if not weekly.apply_current_cycle_rule(
+                        conn, sid, stored_rule_id, old, candidate,
+                        auth.current_name(request) or "监管者", now,
+                    ):
+                        raise ValueError("该规则本周已经执行或没有开启中的周期，不能立即采用")
+                conn.execute(
+                    "INSERT INTO rule_change_events(stage_id,rule_id,actor_name,effective_scope,"
+                    "before_json,after_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (sid, stored_rule_id, auth.current_name(request) or "监管者", effective_scope,
+                     json.dumps(old or {}, ensure_ascii=False),
+                     json.dumps(candidate, ensure_ascii=False), stamp),
+                )
         except (ValueError, TypeError) as error:
             return RedirectResponse("/admin/stages?error=" + str(error), status_code=303)
-        return RedirectResponse(f"/admin/stages?stage_id={sid}", status_code=303)
+        return RedirectResponse(f"/admin/stages?stage_id={sid}&edit_day={candidate['weekday']}", status_code=303)
 
     @app.post("/admin/stages")
     def stages_edit(

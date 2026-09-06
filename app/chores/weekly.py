@@ -150,6 +150,8 @@ def evaluate(conn, cycle, now):
         "WHERE cycle_id=? AND logical_date<? AND status='pending'", (cycle["id"], day.isoformat()),
     )
     for rule in json.loads(cycle["rules_json"]):
+        if not rule.get("active", 1):
+            continue
         if rule["weekday"] != day.weekday():
             continue
         execution = conn.execute(
@@ -200,17 +202,103 @@ def summary(conn, stage, now):
     )}
     rules = []
     for rule in json.loads(cycle["rules_json"]):
-        execution = executions[rule["id"]]
+        execution = executions.get(rule["id"])
+        if execution is None:
+            # A snapshot is normally created together with all execution rows. Keep
+            # old/incomplete data readable instead of failing the whole homepage.
+            continue
         points = rule_points(conn, cycle, rule, dt.date.fromisoformat(execution["logical_date"]), now)
         rules.append({**rule, **{"execution": execution, "remaining": max(0, rule["points_threshold"] - points),
                                 "today": execution["logical_date"] == day.isoformat()}})
-    upcoming = next((rule for rule in rules if rule["execution"]["status"] == "pending"), None)
-    return {"cycle": dict(cycle), "rules": rules, "points": cycle_points(conn, cycle, now),
+    upcoming = next((rule for rule in rules if rule.get("active", 1)
+                     and rule["execution"]["status"] == "pending"), None)
+    points = cycle_points(conn, cycle, now)
+    targets = []
+    for rule in sorted(rules, key=lambda item: (item["weekday"], item["sort_order"], item["id"])):
+        target = int(rule["points_threshold"])
+        if not rule.get("active", 1) or rule["condition_type"] == "none" or target <= 0:
+            continue
+        targets.append({
+            "weekday": rule["weekday"],
+            "threshold": target,
+            "minutes": int(rule["reward_minutes"]),
+            "ends_cycle": bool(rule["ends_cycle"]),
+            "status": rule["execution"]["status"],
+            "remaining": max(0, target - points),
+            "label": f"周{'一二三四五六日'[rule['weekday']]} · {target} 分",
+        })
+    next_target = next((target for target in targets if target["status"] == "pending"), None)
+    progression = {
+        "points": points,
+        "targets": targets,
+        "next": next_target,
+        "remaining": next_target["remaining"] if next_target else 0,
+        "complete": bool(cycle["status"] == "completed" or not next_target),
+    }
+    timeline = []
+    by_day = {rule["weekday"]: rule for rule in rules}
+    for weekday in range(7):
+        timeline.append({"weekday": weekday, "rule": by_day.get(weekday)})
+    return {"cycle": dict(cycle), "rules": rules, "timeline": timeline, "progression": progression,
+            "points": points,
             "next": upcoming, "logical_date": day.isoformat(),
             "next_date": (dt.date.fromisoformat(cycle["end_date"]) + dt.timedelta(days=1)).isoformat(),
             "auto_renew": is_template(conn, stage["id"])["auto_renew"],
             "events": conn.execute("SELECT * FROM cycle_events WHERE cycle_id=? ORDER BY id DESC",
                                    (cycle["id"],)).fetchall()}
+
+
+def apply_current_cycle_rule(conn, stage_id, rule_id, before, after, actor, now):
+    """Apply a rule edit only to the open cycle's pending execution."""
+    cycle = conn.execute(
+        "SELECT * FROM weekly_cycles WHERE stage_id=? AND status='open' "
+        "ORDER BY id DESC LIMIT 1", (stage_id,),
+    ).fetchone()
+    if not cycle:
+        return False
+    execution = conn.execute(
+        "SELECT * FROM rule_executions WHERE cycle_id=? AND rule_id=? AND status='pending'",
+        (cycle["id"], rule_id),
+    ).fetchone()
+    if execution is None:
+        return False
+    snapshot = json.loads(cycle["rules_json"])
+    updated = False
+    for item in snapshot:
+        if int(item["id"]) != int(rule_id):
+            continue
+        item.update({
+            "weekday": int(after["weekday"]),
+            "condition_type": after["condition_type"],
+            "points_threshold": int(after["points_threshold"]),
+            "reward_minutes": int(after["reward_minutes"]),
+            "ends_cycle": int(after["ends_cycle"]),
+            "active": int(after["active"]),
+        })
+        updated = True
+        break
+    if not updated:
+        return False
+    logical_day = dt.date.fromisoformat(cycle["start_date"]) + dt.timedelta(days=int(after["weekday"]))
+    today = (now - dt.timedelta(hours=int(cycle["cutoff_hour"]))).date()
+    if after["active"] and logical_day < today:
+        return False
+    conn.execute("UPDATE weekly_cycles SET rules_json=? WHERE id=?", (json.dumps(snapshot), cycle["id"]))
+    if not after["active"]:
+        conn.execute(
+            "UPDATE rule_executions SET status='skipped',note='管理者本周停用规则' WHERE id=?",
+            (execution["id"],),
+        )
+    else:
+        conn.execute(
+            "UPDATE rule_executions SET logical_date=?,note=? WHERE id=?",
+            (logical_day.isoformat(), "规则已更新，等待本周处理", execution["id"]),
+        )
+    conn.execute(
+        "INSERT INTO cycle_events(cycle_id,occurred_at,description) VALUES (?,?,?)",
+        (cycle["id"], now.isoformat(timespec="seconds"), f"管理者 {actor} 让规则立即生效"),
+    )
+    return True
 
 
 def validate_rules(rules):

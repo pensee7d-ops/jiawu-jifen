@@ -14,5 +14,12 @@ document.querySelectorAll('[data-rule-editor]').forEach(function (form) {
       (ends.checked ? ' · 然后结束本周' : '');
   }
   form.addEventListener('input', preview);
+  form.addEventListener('change', preview);
+  form.addEventListener('submit', function (event) {
+    var scope = form.elements.effective_scope;
+    if (scope && scope.value === 'current_cycle' && !window.confirm('本周立即采用只会更新尚未执行的规则。已经发放的时长不会回收，是否继续？')) {
+      event.preventDefault();
+    }
+  });
   preview();
 });

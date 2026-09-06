@@ -1,72 +1,59 @@
 {% extends "base.html" %}
-{% block title %}周期模板 · 家务勇者村{% endblock %}
-{% macro editor(rule, stage_id) %}
-<form method="post" action="/admin/daily-rules" class="form-card rule-editor" data-rule-editor>
+{% block title %}周期规则 · 家务勇者村{% endblock %}
+{% macro rule_sentence(rule) -%}
+  {%- if not rule -%}未设置规则
+  {%- elif not rule.active -%}已停用
+  {%- elif rule.condition_type == 'none' -%}自动获得 {{ rule.reward_minutes | duration }}
+  {%- else -%}{{ '本周累计' if rule.condition_type == 'week_total' else '当天累计' }}达到 {{ rule.points_threshold }} 分，获得 {{ rule.reward_minutes | duration }}{{ '，本周结束' if rule.ends_cycle }}
+  {%- endif -%}
+{%- endmacro %}
+{% macro editor(rule, stage_id, selected_day) %}
+{% if rule %}
+<form id="toggle-rule-{{ rule.id }}" method="post" action="/admin/daily-rules" hidden><input type="hidden" name="stage_id" value="{{ stage_id }}"><input type="hidden" name="rule_id" value="{{ rule.id }}"><input type="hidden" name="op" value="{{ 'disable' if rule.active else 'enable' }}"></form>
+<form id="copy-rule-{{ rule.id }}" method="post" action="/admin/daily-rules" hidden><input type="hidden" name="stage_id" value="{{ stage_id }}"><input type="hidden" name="rule_id" value="{{ rule.id }}"><input type="hidden" name="op" value="copy"></form>
+{% endif %}
+<form method="post" action="/admin/daily-rules" class="form-card rule-editor-panel" data-rule-editor>
   <input type="hidden" name="stage_id" value="{{ stage_id }}">
   <input type="hidden" name="op" value="{{ 'update' if rule else 'add' }}">
   {% if rule %}<input type="hidden" name="rule_id" value="{{ rule.id }}">{% endif %}
+  <div class="editor-title"><div><span class="eyebrow">编辑周{{ '一二三四五六日'[selected_day] }}</span><h2>{{ '调整规则' if rule else '为这一天设置规则' }}</h2></div>{% if rule %}<span class="status-badge {{ 'subtle' if not rule.active }}">{{ '启用中' if rule.active else '已停用' }}</span>{% endif %}</div>
   <div class="form-grid three">
-    <label>哪一天<select name="weekday">{% for day in range(7) %}<option value="{{ day }}" {{ 'selected' if rule and rule.weekday == day }}>周{{ '一二三四五六日'[day] }}</option>{% endfor %}</select></label>
-    <label>解锁条件<select name="condition_type"><option value="none" {{ 'selected' if rule and rule.condition_type == 'none' }}>无条件</option><option value="week_total" {{ 'selected' if rule and rule.condition_type == 'week_total' }}>本周累计</option><option value="day_total" {{ 'selected' if rule and rule.condition_type == 'day_total' }}>当天累计</option></select></label>
-    <label>目标积分<input type="number" name="points_threshold" min="0" value="{{ rule.points_threshold if rule else 0 }}" required></label>
+    <label>星期<select name="weekday">{% for day in range(7) %}<option value="{{ day }}" {{ 'selected' if day == selected_day }}>周{{ '一二三四五六日'[day] }}</option>{% endfor %}</select></label>
+    <label>触发方式<select name="condition_type"><option value="none" {{ 'selected' if rule and rule.condition_type == 'none' }}>自动</option><option value="week_total" {{ 'selected' if rule and rule.condition_type == 'week_total' }}>本周累计</option><option value="day_total" {{ 'selected' if rule and rule.condition_type == 'day_total' }}>当天累计</option></select></label>
+    <label>达到多少分<input type="number" name="points_threshold" min="0" value="{{ rule.points_threshold if rule else 0 }}" required></label>
   </div>
-  <label>解锁时长（分钟）<input type="number" name="reward_minutes" min="0" value="{{ rule.reward_minutes if rule else 150 }}" required></label>
-  <label class="check-label"><input type="checkbox" name="ends_cycle" value="1" {{ 'checked' if rule and rule.ends_cycle }}>解锁后结束本周（仅周日）</label>
+  <div class="form-grid"><label>自动解锁多久（分钟）<input type="number" name="reward_minutes" min="0" value="{{ rule.reward_minutes if rule else 150 }}" required></label><label class="check-label end-cycle-check"><input type="checkbox" name="ends_cycle" value="1" {{ 'checked' if rule and rule.ends_cycle }}>规则完成后结束本周（仅周日）</label></div>
   <output class="rule-preview" aria-live="polite"></output>
+  {% if rule %}<div class="rule-toggle-actions"><button class="btn small" type="submit" form="toggle-rule-{{ rule.id }}">{{ '停用这条规则' if rule.active else '启用这条规则' }}</button><button class="btn small" type="submit" form="copy-rule-{{ rule.id }}">复制为停用规则</button></div>{% endif %}
+  <fieldset class="effective-scope"><legend>这次修改何时生效</legend><label><input type="radio" name="effective_scope" value="next_cycle" checked> 保存到下个周期</label>{% if rule %}<label><input type="radio" name="effective_scope" value="current_cycle"> 本周立即采用</label><small>只会更新本周尚未执行的这条规则；已经发放的时长不会回收。</small>{% endif %}</fieldset>
   <button class="btn green">保存{{ '修改' if rule else '规则' }}</button>
 </form>
 {% endmacro %}
 {% block content %}
-<a class="admin-back" href="/admin">← 管理中心</a><span class="eyebrow">WEEKLY RULES</span><h1>周期模板 / 日规则</h1>
-<p class="muted">先定一周的节奏，再设置每天的奖励。无需每天手动发放。</p>
+<a class="admin-back" href="/admin">← 管理中心</a><span class="eyebrow">WEEKLY RULES</span><h1>周期规则</h1>
 {% if error %}<div role="alert" class="notice error">{{ error }}</div>{% endif %}
-{% include '_week_progress.html' %}
-<details class="pixel-card create-stage"><summary><b>＋ 创建周规则模板</b><span>预设周五 150 分钟 / 周六 40 分 → 210 分钟 / 周日 70 分 → 150 分钟</span></summary>
-  <form method="post" action="/admin/weekly-templates" class="form-card">
-    <label>模板名称<input name="name" required placeholder="学期周末计划"></label>
-    <div class="form-grid"><label>生效日期<input type="date" name="starts_on" value="{{ today }}" required></label><label>结束日期<input type="date" name="ends_on" required></label></div>
-    <label>每天几点换日<input type="number" name="cutoff_hour" min="0" max="23" value="4" required></label>
-    <label class="check-label"><input type="checkbox" name="auto_renew" value="1" checked>每周一自动开启下一周期</label>
-    <button class="btn green">保存模板（暂不启用）</button>
-  </form>
-</details>
+<details class="pixel-card create-stage"><summary><b>＋ 创建周规则模板</b><span>默认周五自动、周六 40 分、周日 70 分</span></summary><form method="post" action="/admin/weekly-templates" class="form-card"><label>模板名称<input name="name" required placeholder="学期周末计划"></label><div class="form-grid"><label>生效日期<input type="date" name="starts_on" value="{{ today }}" required></label><label>结束日期<input type="date" name="ends_on" required></label></div><label>每天几点换日<input type="number" name="cutoff_hour" min="0" max="23" value="4" required></label><label class="check-label"><input type="checkbox" name="auto_renew" value="1" checked>每周一自动开启下一周期</label><button class="btn green">保存模板（暂不启用）</button></form></details>
 <nav class="filter-tabs" aria-label="选择周期模板">{% for stage in stages if stage.auto_renew is not none %}<a href="/admin/stages?stage_id={{ stage.id }}" class="{{ 'active' if selected and selected.id == stage.id }}">{{ stage.name }}{{ ' · 当前' if stage.active }}</a>{% endfor %}</nav>
+
 {% if selected %}
-<section class="pixel-card">
-  <div class="section-head"><div><span class="eyebrow">01 / TEMPLATE</span><h2>{{ selected.name }}</h2></div><span class="status-badge">{{ '当前模板' if selected.active else '未启用' }}</span></div>
-  <p>{{ selected.starts_on }} → {{ selected.ends_on }} · 周一至周日 · 每日 {{ selected.cutoff_hour }}:00 换日</p>
-  {% if not selected.active %}<form method="post" action="/admin/stages/{{ selected.id }}/switch"><button class="btn green" data-confirm="立即切换？旧周期会封存，已解锁奖励保留。">切换到此阶段</button></form>{% endif %}
-  <details><summary>编辑模板和额外兑换</summary>
-  <form method="post" action="/admin/weekly-templates" class="form-card">
-    <input type="hidden" name="stage_id" value="{{ selected.id }}">
-    <label>名称<input name="name" value="{{ selected.name }}" required></label>
-    <div class="form-grid"><label>开始<input type="date" name="starts_on" value="{{ selected.starts_on }}" required></label><label>结束<input type="date" name="ends_on" value="{{ selected.ends_on }}" required></label></div>
-    <label>每天几点换日<input type="number" name="cutoff_hour" min="0" max="23" value="{{ selected.cutoff_hour }}" required></label>
-    <label class="check-label"><input type="checkbox" name="auto_renew" value="1" {{ 'checked' if selected.auto_renew }}>每周一自动续周</label>
-    <fieldset><legend>额外积分兑换（单独扣余额，立即生效）</legend>
-      <label class="check-label"><input type="checkbox" name="exchange_enabled" value="1" {{ 'checked' if selected.exchange_enabled }}>允许申请额外时长</label>
-      <div class="form-grid three"><label>每份积分<input name="exchange_points_per_unit" type="number" min="1" value="{{ selected.exchange_points_per_unit }}" required></label><label>每份分钟<input name="exchange_minutes_per_unit" type="number" min="1" value="{{ selected.exchange_minutes_per_unit }}" required></label><label>每日分钟上限（0 不限）<input name="exchange_daily_limit_minutes" type="number" min="0" value="{{ selected.exchange_daily_limit_minutes }}" required></label></div>
-    </fieldset>
-    <button class="btn">保存模板</button>
-  </form></details>
+<section class="pixel-card cycle-overview">
+  <div class="section-head compact"><div><span class="eyebrow">CURRENT CYCLE</span><h2>{{ selected.name }}</h2><p>{{ selected.starts_on }} 至 {{ selected.ends_on }} · 每日 {{ selected.cutoff_hour }}:00 换日</p></div><span class="status-badge">{{ '当前模板' if selected.active else '未启用' }}</span></div>
+  {% if week and week.cycle %}<div class="cycle-stats"><span><b>{{ week.points }}</b><small>本周积分</small></span><span><b>{{ week.rules | selectattr('execution.status', 'equalto', 'unlocked') | list | length }}</b><small>已触发规则</small></span><span><b>{{ week.next.points_threshold if week.next else '—' }}</b><small>下一目标积分</small></span></div><p class="cycle-next">{% if week.cycle.status == 'completed' %}本周已封存，下一周期 {{ week.next_date }} 起开启。{% elif week.next %}下一条：周{{ '一二三四五六日'[week.next.weekday] }} · {{ rule_sentence(week.next) }}{% else %}当前没有待触发规则。{% endif %}</p>{% else %}<p>尚未进入生效日期或自动续周已暂停。</p>{% endif %}
+  <div class="button-row">{% if not selected.active %}<form method="post" action="/admin/stages/{{ selected.id }}/switch"><button class="btn green" data-confirm="立即切换？旧周期会封存，已解锁奖励保留。">切换到此模板</button></form>{% endif %}<a class="btn small" href="#template-settings">编辑模板设置</a><a class="btn small" href="#runtime-log">查看运行日志</a></div>
 </section>
-<div class="section-head"><div><span class="eyebrow">02 / DAY RULES</span><h2>日规则卡片</h2></div><small>本周已开启时，修改从下个新周期生效</small></div>
-<div class="notice">规则按实际星期触发。调整顺序仅影响编辑器排列；复制的规则默认停用，修改星期后再启用。当天达标立即发放，不支持补发过期时长。</div>
-{% for rule in daily_rules %}<article class="pixel-card rule-admin-card {{ 'rule-disabled' if not rule.active }}">
-  <div class="section-head"><h2>周{{ '一二三四五六日'[rule.weekday] }} <span class="status-badge subtle">{{ '启用' if rule.active else '停用' }}</span></h2><strong>{{ rule.reward_minutes | duration }}</strong></div>
-  <p>{% if rule.condition_type == 'none' %}无条件自动获得{% else %}{{ '本周累计' if rule.condition_type == 'week_total' else '当天累计' }}达到 {{ rule.points_threshold }} 分后自动解锁{% endif %} · 当天有效{{ ' · 解锁后结束本周' if rule.ends_cycle }}</p>
-  <div class="button-row">{% for operation, label in [('copy','复制'),('up','上移'),('down','下移'),('disable' if rule.active else 'enable','停用' if rule.active else '启用')] %}
-    <form method="post" action="/admin/daily-rules"><input type="hidden" name="stage_id" value="{{ selected.id }}"><input type="hidden" name="rule_id" value="{{ rule.id }}"><input type="hidden" name="op" value="{{ operation }}"><button class="btn small">{{ label }}</button></form>{% endfor %}
-  </div>
-  <details><summary>编辑这条规则</summary>{{ editor(rule, selected.id) }}</details>
-</article>{% endfor %}
-<details class="pixel-card"><summary>＋ 添加一天的规则</summary>{{ editor(none, selected.id) }}</details>
-<section class="pixel-card"><span class="eyebrow">03 / PREVIEW</span><h2>下个新周期规则预览</h2>
-{% for rule in daily_rules | sort(attribute='weekday') if rule.active %}<p><b>周{{ '一二三四五六日'[rule.weekday] }}</b> · {% if rule.condition_type == 'none' %}自动{% else %}{{ '本周' if rule.condition_type == 'week_total' else '当天' }} {{ rule.points_threshold }} 分 →{% endif %} {{ rule.reward_minutes | duration }}{{ '，然后结束本周' if rule.ends_cycle }}</p>{% endfor %}
-</section>
-{% if week and week.cycle %}<details class="pixel-card" open><summary>本周运行日志</summary>{% for event in week.events %}<div class="ledger-row"><div><b>{{ event.description }}</b><small>{{ event.occurred_at.replace('T',' ') }}</small></div></div>{% endfor %}</details>{% endif %}
+
+<section class="rule-timeline-section"><div class="section-head"><div><span class="eyebrow">WEEK TIMELINE</span><h2>周一到周日</h2></div><small>点选某一天，在下方集中编辑</small></div><div class="rule-week-timeline">{% for slot in template_timeline %}{% set rule = slot.rule %}<a class="rule-day-slot {{ 'selected' if slot.weekday == selected_day }} {{ 'enabled' if rule and rule.active else 'empty' }}" href="/admin/stages?stage_id={{ selected.id }}&edit_day={{ slot.weekday }}"><span>周{{ '一二三四五六日'[slot.weekday] }}</span><b>{% if rule and rule.active %}{{ rule.reward_minutes | duration }}{% else %}未设置{% endif %}</b><small>{{ rule_sentence(rule) }}</small>{% if slot.execution %}<i class="{{ slot.execution.status }}">{% if slot.execution.status == 'unlocked' %}已解锁{% elif slot.execution.status == 'skipped' %}已跳过{% else %}等待中{% endif %}</i>{% endif %}</a>{% endfor %}</div></section>
+
+{{ editor(editing_rule, selected.id, selected_day) }}
+
+<section class="pixel-card preview-card"><span class="eyebrow">NEXT CYCLE PREVIEW</span><h2>下个周期会这样执行</h2>{% for slot in template_timeline if slot.rule and slot.rule.active %}<p><b>周{{ '一二三四五六日'[slot.weekday] }}</b>：{{ rule_sentence(slot.rule) }} · 当天有效</p>{% else %}<p>还没有启用规则。</p>{% endfor %}</section>
+
+<details id="template-settings" class="pixel-card"><summary>周期设置与额外兑换</summary><form method="post" action="/admin/weekly-templates" class="form-card"><input type="hidden" name="stage_id" value="{{ selected.id }}"><label>周期名称<input name="name" value="{{ selected.name }}" required></label><div class="form-grid"><label>生效日期<input type="date" name="starts_on" value="{{ selected.starts_on }}" required></label><label>结束日期<input type="date" name="ends_on" value="{{ selected.ends_on }}" required></label></div><label>逻辑日切换小时<input type="number" name="cutoff_hour" min="0" max="23" value="{{ selected.cutoff_hour }}" required></label><label class="check-label"><input type="checkbox" name="auto_renew" value="1" {{ 'checked' if selected.auto_renew }}>每周一自动开启下一周期</label><fieldset><legend>额外兑换</legend><label class="check-label"><input type="checkbox" name="exchange_enabled" value="1" {{ 'checked' if selected.exchange_enabled }}>允许积分兑换额外时长</label><div class="form-grid three"><label>每份积分<input name="exchange_points_per_unit" type="number" min="1" value="{{ selected.exchange_points_per_unit }}" required></label><label>兑换分钟<input name="exchange_minutes_per_unit" type="number" min="1" value="{{ selected.exchange_minutes_per_unit }}" required></label><label>每天上限（0 不限）<input name="exchange_daily_limit_minutes" type="number" min="0" value="{{ selected.exchange_daily_limit_minutes }}" required></label></div></fieldset><button class="btn">保存周期设置</button></form></details>
+
+{% if week and week.cycle %}<details id="runtime-log" class="pixel-card"><summary>本周运行日志</summary>{% for event in week.events %}<div class="ledger-row"><div><b>{{ event.description }}</b><small>{{ event.occurred_at.replace('T',' ') }}</small></div></div>{% else %}<p>本周还没有运行记录。</p>{% endfor %}</details>{% endif %}
+<details class="pixel-card"><summary>规则变更审计</summary>{% for event in rule_change_events %}<div class="ledger-row"><div><b>{{ event.actor_name }} · {{ '本周立即采用' if event.effective_scope == 'current_cycle' else '下个周期生效' }}</b><small>{{ event.created_at.replace('T',' ') }}</small></div></div>{% else %}<p>还没有规则变更记录。</p>{% endfor %}</details>
 {% endif %}
-<details class="pixel-card"><summary>旧阶段与历史（只读保留）</summary>{% for stage in stages if stage.auto_renew is none %}<p><b>{{ stage.name }}</b> · {{ stage.starts_on }} → {{ stage.ends_on }} · 阈值 {{ stage.points_goal }} 分 / 基础 {{ stage.basic_minutes }} 分钟 / 奖励 {{ stage.reward_minutes }} 分钟</p>{% else %}<p>没有旧阶段。</p>{% endfor %}<a href="/history">查看历史周期 →</a></details>
+<details class="pixel-card"><summary>旧阶段与历史（只读保留）</summary>{% for stage in stages if stage.auto_renew is none %}<p><b>{{ stage.name }}</b> · {{ stage.starts_on }} 至 {{ stage.ends_on }} · 阈值 {{ stage.points_goal }} 分</p>{% else %}<p>没有旧阶段。</p>{% endfor %}<a href="/history">查看历史周期 →</a></details>
 {% if switches %}<details class="pixel-card"><summary>阶段切换记录</summary>{% for item in switches %}<p>{{ item.switched_at.replace('T',' ') }} · {{ item.old_name or '无阶段' }} → {{ item.new_name }} · {{ item.switched_by }}</p>{% endfor %}</details>{% endif %}
 <script src="/static/rules.js" defer></script>
 {% endblock %}

@@ -1,50 +1,46 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="hero status-hero">
-  <div><span class="eyebrow">HOME STATUS</span><h1>今日状态</h1>
-    <p>{{ stage['name'] if stage else '暂未启用阶段' }} · {{ '管理者视角' if role == 'supervisor' else '勇者视角' }}</p>
-  </div>
-  <a class="level-orb" href="/points"><small>积分余额</small><b>{{ points.balance }}</b></a>
+<section class="home-heading">
+  <div><span class="eyebrow">{{ '管理概览' if role == 'supervisor' else '今天的进度' }}</span><h1>{{ '本周运行状态' if role == 'supervisor' else '今天能用多久？' }}</h1></div>
+  <a class="home-points-link" href="/points"><small>历史余额</small><b>{{ points.balance }}</b><span>分</span></a>
 </section>
 {% if role == 'supervisor' and pending.total %}
-<section class="attention-banner"><div><span class="attention-pulse"></span><b>有 {{ pending.total }} 项等待处理</b><p>打卡 {{ pending.checkin }} · 任务 {{ pending.mission }} · 时长兑换 {{ pending.time_exchange }}</p></div><a class="btn" href="/admin/reviews">立即审核 →</a></section>
+<section class="attention-banner"><div><span class="attention-pulse"></span><b>{{ pending.total }} 项等待处理</b><p>打卡 {{ pending.checkin }} · 任务 {{ pending.mission }} · 时长兑换 {{ pending.time_exchange }}</p></div><a class="btn" href="/admin/reviews">去审核</a></section>
 {% endif %}
-{% if not stage %}<div class="notice warning">当前没有生效阶段。积分仍会记录，但不会自动发放电脑额度。{% if role == 'supervisor' %}<a href="/admin/stages">配置阶段 →</a>{% endif %}</div>{% endif %}
-{% include '_week_progress.html' %}
-<section class="stat-grid">
-  <a href="/points" class="pixel-card score-card status-link-card">
-    <div class="card-title"><span>◇</span> {{ '历史总余额' if week else '积分能量' }}</div>
-    {% if week %}
-    <div class="score-line"><b>{{ points.balance }}</b><span>分</span></div>
-    <p class="muted">本周目标单独累计；额外兑换只扣余额，不影响周目标。</p>
-    <div class="mini-stats"><span>可兑换 <b>{{ points.spendable }}</b></span></div>
-    {% else %}
-    <div class="score-line"><b>{{ points.balance }}</b><span>/ {{ points.goal or goal }}</span></div>
-    <div class="pixel-bar"><i style="width:{{ points.progress if stage else progress }}%"></i></div>
-    <div class="mini-stats"><span>可兑换 <b>{{ points.spendable }}</b></span><span>待结算 <b>{{ points.locked }}</b></span></div>
-    {% endif %}
-    <small class="card-route">查看完整积分账本 →</small>
-  </a>
-  <article id="computer-live" data-used="{{ computer.used }}" data-allowance="{{ computer.allowance }}" data-running="{{ 1 if computer.open_session else 0 }}" class="pixel-card computer-card {{ 'danger-card' if computer.overrun else '' }}">
-    <div class="card-title"><span>▣</span> 今日电脑</div>
-    <div class="computer-status"><span class="status-dot {{ 'online' if computer.open_session else '' }}"></span>{{ '使用中' if computer.open_session else '未开机' }}</div>
-    <div class="time-line"><b id="computer-primary">{{ computer.remaining if not computer.overrun else computer.overrun }}</b><span id="computer-label">分钟{{ '超时' if computer.overrun else '剩余' }}</span></div>
-    <div class="today-computer-metrics" aria-label="今日电脑时长"><span><b>{{ computer.allowance }}</b><small>今日获得</small></span><span><b id="computer-used">{{ computer.used }}</b><small>今日已用</small></span><span><b>{{ computer.remaining }}</b><small>今日剩余</small></span></div>
-    <p class="muted">{{ comp_seg }} 段使用记录{% if computer.overrun %} · 已超时 {{ computer.overrun }} 分钟{% endif %}</p>
-    {% if week %}<div class="grant-sources"><b>今日获得 {{ computer.allowance | duration }}</b>{% for grant in computer.grants %}<small>{{ grant.description }} · {{ grant.minutes }} 分钟</small>{% else %}<small>今天尚无额度。查看本周规则，完成目标后自动解锁。</small>{% endfor %}</div>{% endif %}
+{% if not stage %}<div class="notice warning">当前没有生效阶段。积分仍会记录，但不会自动发放电脑额度。{% if role == 'supervisor' %}<a href="/admin/stages">配置规则 →</a>{% endif %}</div>{% endif %}
+
+<section class="home-core-grid">
+  <article id="computer-live" data-used="{{ computer.used }}" data-allowance="{{ computer.allowance }}" data-running="{{ 1 if computer.open_session else 0 }}" class="pixel-card home-computer-card {{ 'danger-card' if computer.overrun else '' }}">
+    <div class="section-head compact"><div><span class="eyebrow">TODAY / COMPUTER</span><h2>今日电脑时间</h2></div><span class="status-dot {{ 'online' if computer.open_session else '' }}"></span></div>
+    <div class="home-time-primary"><b id="computer-primary">{{ computer.remaining if not computer.overrun else computer.overrun }}</b><span id="computer-label">分钟{{ '超时' if computer.overrun else '剩余' }}</span></div>
+    <p class="home-state" id="computer-state">{% if computer.overrun %}已超时 {{ computer.overrun }} 分钟{% elif computer.allowance == 0 %}今天尚未解锁电脑时间{% elif computer.remaining == 0 %}已用完今日额度{% else %}今天还有 {{ computer.remaining | duration }}{% endif %}</p>
+    <div class="today-computer-metrics" aria-label="今日电脑时长"><span><b>{{ computer.allowance }}</b><small>今日获得</small></span><span><b id="computer-used">{{ computer.used }}</b><small>今日已用</small></span><span><b id="computer-remaining">{{ computer.remaining }}</b><small>今日剩余</small></span></div>
+    {% if computer.grants %}<p class="home-source">来源：{% for grant in computer.grants %}{{ grant.description }}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
     {% if role == 'checkin' %}<div class="button-row home-computer-actions"><form method="post" action="/computer/on"><input type="hidden" name="return_to" value="/"><button class="btn green" {{ 'disabled' if computer.open_session }}>▶ 开机</button></form><form method="post" action="/computer/off"><input type="hidden" name="return_to" value="/"><button class="btn red" {{ 'disabled' if not computer.open_session }}>■ 关机</button></form></div>{% endif %}
-    <a class="card-route" href="/computer">查看记录、额度与兑换 →</a>
+    <a class="card-route" href="/computer">查看额度和使用记录 →</a>
+  </article>
+
+  <article class="pixel-card weekly-progress-card">
+    <div class="section-head compact"><div><span class="eyebrow">THIS WEEK / POINTS</span><h2>本周积分目标</h2></div>{% if week and week.cycle %}<span class="status-badge {{ 'subtle' if week.cycle.status == 'open' else '' }}">{{ '本周已结算' if week.cycle.status == 'completed' else '进行中' }}</span>{% endif %}</div>
+    {% if week and week.cycle %}
+      {% set prog = week.progression %}{% set scale = prog.targets[-1].threshold if prog.targets else 1 %}{% set rail_width = 100 if prog.points >= scale else ((prog.points / scale * 100) | round | int) %}
+      <div class="week-points-number"><b>{{ prog.points }}</b><span>本周已获得 / {{ scale }} 分</span></div>
+      <div class="goal-rail" aria-label="本周积分递进目标"><i style="width:{{ rail_width }}%"></i><span class="goal-start">0<br><small>开始</small></span>{% for target in prog.targets %}{% set position = (target.threshold / scale * 100) | round | int %}<span class="goal-node {{ 'passed' if target.status == 'unlocked' else ('current' if prog.next and target.threshold == prog.next.threshold else 'future') }}" style="left:{{ position }}%"><b>{{ target.threshold }}</b><small>{% if target.status == 'unlocked' %}已解锁 {{ target.minutes | duration }}{% elif prog.next and target.threshold == prog.next.threshold %}下一目标{% else %}目标{% endif %}</small></span>{% endfor %}</div>
+      <div class="goal-summary">{% if prog.complete %}<b>本周已结算</b><span>下一周期 {{ week.next_date }} 开始</span>{% elif prog.next %}<b>下一目标：{{ prog.next.threshold }} 分</b><span>还差 {{ prog.remaining }} 分 · 解锁 {{ prog.next.minutes | duration }}</span>{% else %}<b>本周目标已完成</b>{% endif %}</div>
+    {% else %}
+      <div class="weekly-empty"><b>本周暂未开启规则</b><span>{{ week.message if week else '等待管理者配置周期模板' }}</span></div>
+    {% endif %}
+    <a class="card-route" href="/computer">查看本周规则 →</a>
   </article>
 </section>
-<section class="today-glance">
-  <div class="section-head"><div><span class="eyebrow">TODAY AT A GLANCE</span><h2>今日概况</h2></div><a href="/activity">进入冒险动态 →</a></div>
-  <div class="glance-grid">
-    <a href="/activity?kind=checkin" class="glance-item"><span>✓</span><b>{{ today_checkins }}</b><small>今日打卡</small></a>
-    <a href="/activity#missions" class="glance-item"><span>!</span><b>{{ active_missions|length }}</b><small>当前任务</small></a>
-    <div class="glance-item"><span>◆</span><b>{{ stage['name'] if stage else '未设置' }}</b><small>当前阶段</small></div>
-  </div>
+
+<section class="today-summary pixel-card">
+  {% if role == 'supervisor' %}
+  <div><span class="eyebrow">TODAY / REVIEW</span><h2>待审核事项</h2><p>优先处理会影响本周目标的积分和时长申请。</p></div><a class="summary-action" href="/admin/reviews"><b>{{ pending.total }}</b><span>项待处理 →</span></a>
+  {% else %}
+  <div><span class="eyebrow">TODAY / ACTION</span><h2>今天的任务</h2><p>{{ today_checkins }} 次打卡 · {{ active_missions|length }} 个待处理任务</p></div><div class="summary-links"><a href="/checkin">去打卡</a><a href="/activity">查看动态 →</a></div>
+  {% endif %}
 </section>
-{% if active_missions %}<section class="mission-summary"><div class="section-head"><h2>任务信号</h2><a href="/activity#missions">查看并处理 →</a></div>{% for m in active_missions %}<a href="/activity#mission-{{ m['id'] }}" class="mission-mini"><span class="quest-mark">!</span><div><b>{{ m['title'] }}</b><small>+{{ m['points'] }} XP · {% if m['status']=='open' %}待领取{% elif m['status']=='claimed' %}进行中{% else %}待审核{% endif %}</small></div></a>{% endfor %}</section>{% endif %}
 {% if announcement %}<div class="notice village-note"><b>村庄公告</b><p>{{ announcement }}</p></div>{% endif %}
 <script>
 (function () {
@@ -55,8 +51,10 @@
     var used = baseline + Math.floor((Date.now() - opened) / 60000);
     var over = Math.max(0, used - allowance), remaining = Math.max(0, allowance - used);
     document.getElementById('computer-used').textContent = used;
+    document.getElementById('computer-remaining').textContent = remaining;
     document.getElementById('computer-primary').textContent = over || remaining;
     document.getElementById('computer-label').textContent = '分钟' + (over ? '超时' : '剩余');
+    document.getElementById('computer-state').textContent = over ? '已超时 ' + over + ' 分钟' : remaining ? '今天还有 ' + remaining + ' 分钟' : '已用完今日额度';
     card.classList.toggle('danger-card', over > 0);
   }
   setInterval(tick, 30000);
