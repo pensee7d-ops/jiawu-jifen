@@ -1,6 +1,9 @@
 import os
 import datetime as dt
 import uuid
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, Form, UploadFile, File
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -11,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from chores.config import Config
 from chores import db as dbmod
-from chores import auth, scoring, lifecycle, records
+from chores import auth, scoring, lifecycle, records, weekly
 from chores.images import save_photo, PhotoError
 
 BASE = os.path.dirname(__file__)
@@ -30,12 +33,34 @@ def create_app() -> FastAPI:
     dbmod.init_schema(conn)
     dbmod.migrate(conn)
     dbmod.seed_defaults(conn)
+    weekly.migrate_active(conn, _now())
     dbmod.ensure_open_period(conn, _now().isoformat(timespec="seconds"))
     lifecycle.ensure_state(conn, _now())
     os.makedirs(cfg.photo_dir, exist_ok=True)
     records.purge_expired(conn, cfg.photo_dir, _now())
 
-    app = FastAPI()
+    state_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async def clock():
+            while True:
+                await asyncio.sleep(30)
+                async with state_lock:
+                    try:
+                        lifecycle.ensure_state(conn, _now())
+                    except Exception:
+                        conn.rollback()
+                        logging.getLogger(__name__).exception("自动周期处理失败，下次重试")
+        task = asyncio.create_task(clock())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(lifespan=lifespan)
     app.add_middleware(SessionMiddleware, secret_key=cfg.secret_key)
     app.mount("/static", StaticFiles(directory=os.path.join(BASE, "static")), name="static")
     app.mount("/photos", StaticFiles(directory=cfg.photo_dir), name="photos")
@@ -45,14 +70,27 @@ def create_app() -> FastAPI:
     app.state.conn = conn
     app.state.templates = templates
 
+    templates.env.globals["weekly_status"] = lambda: weekly.summary(
+        conn, lifecycle.active_stage(conn, _now()), _now(),
+    )
+    templates.env.filters["duration"] = lambda minutes: (
+        f"{int(minutes) // 60} 小时 {int(minutes) % 60} 分" if int(minutes) % 60
+        else f"{int(minutes) // 60} 小时"
+    )
+
     @app.middleware("http")
     async def keep_settlements_current(request: Request, call_next):
-        now = _now()
-        records.purge_expired(conn, cfg.photo_dir, now)
-        lifecycle.ensure_state(conn, now)
-        _expire_exchange_requests(now)
-        _expire_missions(now.isoformat(timespec="seconds"))
-        return await call_next(request)
+        async with state_lock:
+            try:
+                now = _now()
+                records.purge_expired(conn, cfg.photo_dir, now)
+                lifecycle.ensure_state(conn, now)
+                _expire_exchange_requests(now)
+                _expire_missions(now.isoformat(timespec="seconds"))
+                return await call_next(request)
+            except Exception:
+                conn.rollback()
+                raise
 
     def _goal() -> int:
         v = dbmod.get_setting(conn, "period_goal", str(cfg.weekly_goal))
@@ -86,7 +124,8 @@ def create_app() -> FastAPI:
             "FROM time_exchange_requests r JOIN stages s ON s.id=r.stage_id "
             "WHERE r.status='pending'"
         ).fetchall():
-            current_day = lifecycle.logical_date(now, int(row["cutoff_hour"])).isoformat()
+            cutoff = active["cutoff_hour"] if active and active["id"] == row["stage_id"] else row["cutoff_hour"]
+            current_day = lifecycle.logical_date(now, int(cutoff)).isoformat()
             if current_day != row["logical_date"] or not active or active["id"] != row["stage_id"]:
                 conn.execute(
                     "UPDATE time_exchange_requests SET status='expired',reviewed_at=?,"
@@ -311,6 +350,7 @@ def create_app() -> FastAPI:
         now = _now()
         today = now.date()
         stage, window = lifecycle.ensure_state(conn, now)
+        week = weekly.summary(conn, stage, now)
         period = dbmod.current_period(conn)
         if period is None:
             dbmod.ensure_open_period(conn, now.isoformat(timespec="seconds"))
@@ -357,6 +397,7 @@ def create_app() -> FastAPI:
             "points": points,
             "stage": dict(stage) if stage else None,
             "window": dict(window) if window else None,
+            "week": week,
             "announcement": ann["body"] if ann else "",
             "today_checkins": int(today_checkins),
             "active_missions": active_missions,
@@ -366,7 +407,7 @@ def create_app() -> FastAPI:
 
     @app.get("/activity", response_class=HTMLResponse)
     def activity_page(request: Request, feed_date: str = "", kind: str = "all",
-                      error: str = ""):
+                      error: str = "", cycle_id: str = ""):
         if auth.current_role(request) is None:
             return RedirectResponse("/login", status_code=303)
         now = _now()
@@ -390,6 +431,10 @@ def create_app() -> FastAPI:
         selected = min(max(selected, minimum), maximum)
         start = dt.datetime.combine(selected, dt.time(hour=cutoff))
         end = start + dt.timedelta(days=1)
+        selected_cycle = conn.execute("SELECT * FROM weekly_cycles WHERE id=?", (cycle_id,)).fetchone() if cycle_id else None
+        if selected_cycle:
+            start = dt.datetime.fromisoformat(selected_cycle["start_at"])
+            end = dt.datetime.fromisoformat(selected_cycle["end_at"])
         start_iso, end_iso = start.isoformat(), end.isoformat()
 
         items = []
@@ -481,6 +526,8 @@ def create_app() -> FastAPI:
             "feed_max": maximum.isoformat(),
             "feed_prev": (selected - dt.timedelta(days=1)).isoformat() if selected > minimum else None,
             "feed_next": (selected + dt.timedelta(days=1)).isoformat() if selected < maximum else None,
+            "cycles": conn.execute("SELECT * FROM weekly_cycles ORDER BY start_at DESC,id DESC LIMIT 52").fetchall(),
+            "selected_cycle": selected_cycle,
         })
 
     @app.get("/history", response_class=HTMLResponse)
@@ -503,7 +550,8 @@ def create_app() -> FastAPI:
                 "total": agg["total"], "n": agg["n"] or 0,
             })
         return templates.TemplateResponse(
-            request, "history.html", {"request": request, "items": items}
+            request, "history.html", {"request": request, "items": items,
+                "cycles": conn.execute("SELECT * FROM weekly_cycles ORDER BY start_at DESC,id DESC").fetchall()}
         )
 
     @app.get("/history/{pid}", response_class=HTMLResponse)
@@ -525,6 +573,30 @@ def create_app() -> FastAPI:
             "feed": _build_feed(rows),
         }
         return templates.TemplateResponse(request, "history_detail.html", ctx)
+
+    @app.get("/cycles/{cycle_id}", response_class=HTMLResponse)
+    def cycle_detail(request: Request, cycle_id: int):
+        if auth.current_role(request) is None:
+            return RedirectResponse("/login", status_code=303)
+        cycle = conn.execute("SELECT * FROM weekly_cycles WHERE id=?", (cycle_id,)).fetchone()
+        if cycle is None:
+            return RedirectResponse("/history", status_code=303)
+        stage = conn.execute("SELECT * FROM stages WHERE id=?", (cycle["stage_id"],)).fetchone()
+        snapshot = weekly.summary(conn, stage, _now())
+        if not snapshot or not snapshot.get("cycle") or snapshot["cycle"]["id"] != cycle_id:
+            import json
+            rules = json.loads(cycle["rules_json"])
+            executions = {row["rule_id"]: dict(row) for row in conn.execute(
+                "SELECT * FROM rule_executions WHERE cycle_id=?", (cycle_id,),
+            )}
+            snapshot = {"cycle": dict(cycle), "points": int(cycle["points_at_close"] or 0),
+                        "rules": [{**rule, "execution": executions.get(rule["id"], {}), "today": False,
+                                   "remaining": 0} for rule in rules],
+                        "events": conn.execute("SELECT * FROM cycle_events WHERE cycle_id=? ORDER BY id DESC",
+                                               (cycle_id,)).fetchall(), "auto_renew": False}
+        return templates.TemplateResponse(request, "cycle_detail.html", {
+            "request": request, "week": snapshot, "stage": stage,
+        })
 
     @app.get("/archive", response_class=HTMLResponse)
     def archive_confirm(request: Request):
@@ -675,7 +747,8 @@ def create_app() -> FastAPI:
             "request": request, "kind": allowed, "message": message,
             "pending": _pending_summary(),
             "checkins": conn.execute(
-                "SELECT * FROM checkins WHERE status='pending' AND deleted_at IS NULL ORDER BY id"
+                "SELECT * FROM checkins WHERE status='pending' AND deleted_at IS NULL "
+                "ORDER BY COALESCE(proposed_points,0) DESC,id"
             ).fetchall() if allowed in ("all", "checkin") else [],
             "missions": conn.execute(
                 "SELECT * FROM missions WHERE status='submitted' AND deleted_at IS NULL ORDER BY submitted_at"
@@ -973,18 +1046,148 @@ def create_app() -> FastAPI:
         return RedirectResponse("/admin/reviews?kind=mission", status_code=303)
 
     @app.get("/admin/stages", response_class=HTMLResponse)
-    def stages_page(request: Request, error: str = ""):
+    def stages_page(request: Request, error: str = "", stage_id: str = ""):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
-        rows = conn.execute("SELECT * FROM stages ORDER BY starts_on DESC, id DESC").fetchall()
+        rows = [dict(row) for row in conn.execute(
+            "SELECT s.*,t.auto_renew FROM stages s LEFT JOIN rule_templates t ON t.stage_id=s.id "
+            "ORDER BY s.active DESC,s.id DESC"
+        )]
+        selected = next((row for row in rows if str(row["id"]) == stage_id), None)
+        if selected is None:
+            selected = next((row for row in rows if row["auto_renew"] is not None), None)
+        rules = [dict(row) for row in conn.execute(
+            "SELECT * FROM daily_rules WHERE stage_id=? ORDER BY sort_order,weekday,id",
+            (selected["id"],),
+        )] if selected else []
         return templates.TemplateResponse(request, "stages_admin.html", {
-            "request": request, "stages": rows, "error": error,
+            "request": request, "stages": rows, "selected": selected, "daily_rules": rules,
+            "error": error, "week": weekly.summary(conn, selected, _now()),
+            "today": _now().date().isoformat(),
             "switches": conn.execute(
                 "SELECT x.*,o.name AS old_name,n.name AS new_name FROM stage_switches x "
                 "LEFT JOIN stages o ON o.id=x.old_stage_id JOIN stages n ON n.id=x.new_stage_id "
                 "ORDER BY x.id DESC LIMIT 20"
             ).fetchall(),
         })
+
+    @app.post("/admin/weekly-templates")
+    def weekly_template_edit(
+        request: Request, stage_id: str = Form(""), name: str = Form(""),
+        starts_on: str = Form(""), ends_on: str = Form(""), cutoff_hour: str = Form("4"),
+        auto_renew: str = Form("0"), exchange_enabled: str = Form("0"),
+        exchange_points_per_unit: str = Form("10"), exchange_minutes_per_unit: str = Form("30"),
+        exchange_daily_limit_minutes: str = Form("60"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            cutoff = int(cutoff_hour)
+            start, end = dt.date.fromisoformat(starts_on), dt.date.fromisoformat(ends_on)
+            exchange_points, exchange_minutes, exchange_limit = map(int, (
+                exchange_points_per_unit, exchange_minutes_per_unit, exchange_daily_limit_minutes,
+            ))
+            if not name.strip() or start > end or not 0 <= cutoff <= 23:
+                raise ValueError("名称、日期或切换小时不合法")
+            if min(exchange_points, exchange_minutes) <= 0 or exchange_limit < 0:
+                raise ValueError("额外兑换规则不合法")
+            sid = int(stage_id) if stage_id else None
+            if sid and not weekly.is_template(conn, sid):
+                raise ValueError("周期模板不存在")
+        except (ValueError, TypeError) as error:
+            return RedirectResponse("/admin/stages?error=" + str(error), status_code=303)
+        now = _now()
+        with conn:
+            if sid:
+                conn.execute(
+                    "UPDATE stages SET name=?,starts_on=?,ends_on=?,cutoff_hour=? WHERE id=?",
+                    (name.strip(), starts_on, ends_on, cutoff, sid),
+                )
+                conn.execute("UPDATE rule_templates SET auto_renew=? WHERE stage_id=?",
+                             (int(auto_renew == "1"), sid))
+            else:
+                sid = conn.execute(
+                    "INSERT INTO stages(name,starts_on,ends_on,mode,cutoff_hour,points_goal,"
+                    "basic_minutes,reward_minutes,active,created_at,created_by) "
+                    "VALUES (?,?,?,'rules',?,0,0,0,0,?,?)",
+                    (name.strip(), starts_on, ends_on, cutoff, now.isoformat(timespec="seconds"),
+                     auth.current_name(request)),
+                ).lastrowid
+                weekly.install_template(conn, sid, now, int(auto_renew == "1"))
+            conn.execute(
+                "UPDATE stages SET exchange_enabled=?,exchange_points_per_unit=?,"
+                "exchange_minutes_per_unit=?,exchange_daily_limit_minutes=? WHERE id=?",
+                (int(exchange_enabled == "1"), exchange_points, exchange_minutes, exchange_limit, sid),
+            )
+        return RedirectResponse(f"/admin/stages?stage_id={sid}", status_code=303)
+
+    @app.post("/admin/daily-rules")
+    def daily_rule_edit(
+        request: Request, op: str = Form("add"), rule_id: str = Form(""),
+        stage_id: str = Form(""), weekday: str = Form("4"),
+        condition_type: str = Form("none"), points_threshold: str = Form("0"),
+        reward_minutes: str = Form("0"), ends_cycle: str = Form("0"),
+    ):
+        if auth.current_role(request) != auth.ROLE_SUPERVISOR:
+            return RedirectResponse("/login", status_code=303)
+        try:
+            sid, day, threshold, minutes = map(int, (stage_id, weekday, points_threshold, reward_minutes))
+            rid = int(rule_id) if rule_id else None
+            if not weekly.is_template(conn, sid):
+                raise ValueError("周期模板不存在")
+            if op not in ("add", "update", "disable", "enable", "copy", "up", "down"):
+                raise ValueError("未知操作")
+            if not 0 <= day <= 6 or threshold < 0 or minutes < 0:
+                raise ValueError("星期、积分或分钟不合法")
+            if condition_type not in ("none", "week_total", "day_total"):
+                raise ValueError("触发条件不合法")
+            rules = [dict(row) for row in conn.execute(
+                "SELECT * FROM daily_rules WHERE stage_id=? ORDER BY sort_order,id", (sid,),
+            )]
+            old = next((rule for rule in rules if rule["id"] == rid), None)
+            if op != "add" and old is None:
+                raise ValueError("规则不存在或不属于该模板")
+            if op in ("up", "down"):
+                position = rules.index(old)
+                target = position + (-1 if op == "up" else 1)
+                if 0 <= target < len(rules):
+                    rules[position], rules[target] = rules[target], rules[position]
+                with conn:
+                    for order, rule in enumerate(rules):
+                        conn.execute("UPDATE daily_rules SET sort_order=? WHERE id=?", (order, rule["id"]))
+                return RedirectResponse(f"/admin/stages?stage_id={sid}", status_code=303)
+            if op in ("disable", "enable"):
+                candidate = {**old, "active": int(op == "enable")}
+            elif op == "copy":
+                candidate = {**old, "id": None, "active": 0, "sort_order": len(rules)}
+            else:
+                candidate = {"id": rid, "weekday": day, "condition_type": condition_type,
+                             "points_threshold": 0 if condition_type == "none" else threshold,
+                             "reward_minutes": minutes, "ends_cycle": int(ends_cycle == "1"),
+                             "active": old["active"] if old else 1,
+                             "sort_order": old["sort_order"] if old else len(rules)}
+            proposed = [rule for rule in rules if rule["id"] != candidate["id"]] + [candidate]
+            weekly.validate_rules(proposed)
+            stamp = _now().isoformat(timespec="seconds")
+            values = (candidate["weekday"], candidate["condition_type"], candidate["points_threshold"],
+                      candidate["reward_minutes"], candidate["ends_cycle"], candidate["active"],
+                      candidate["sort_order"], stamp)
+            with conn:
+                if candidate["id"]:
+                    conn.execute(
+                        "UPDATE daily_rules SET weekday=?,condition_type=?,points_threshold=?,reward_minutes=?,"
+                        "ends_cycle=?,active=?,sort_order=?,updated_at=? WHERE id=? AND stage_id=?",
+                        values + (candidate["id"], sid),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO daily_rules(weekday,condition_type,points_threshold,reward_minutes,"
+                        "ends_cycle,active,sort_order,updated_at,stage_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        values + (sid, stamp),
+                    )
+        except (ValueError, TypeError) as error:
+            return RedirectResponse("/admin/stages?error=" + str(error), status_code=303)
+        return RedirectResponse(f"/admin/stages?stage_id={sid}", status_code=303)
 
     @app.post("/admin/stages")
     def stages_edit(
@@ -1000,6 +1203,10 @@ def create_app() -> FastAPI:
     ):
         if auth.current_role(request) != auth.ROLE_SUPERVISOR:
             return RedirectResponse("/login", status_code=303)
+        if stage_id and conn.execute(
+            "SELECT 1 FROM rule_templates WHERE stage_id=?", (stage_id,),
+        ).fetchone():
+            return RedirectResponse("/admin/stages?error=请使用周期模板编辑器", status_code=303)
         try:
             cutoff = int(cutoff_hour)
             start_wd = int(window_start_weekday) if mode == "weekly" else 4
@@ -1065,6 +1272,9 @@ def create_app() -> FastAPI:
             return RedirectResponse("/admin/stages", status_code=303)
         if old:
             lifecycle.settle_open_stage(conn, old["id"], now)
+            old_cycle = weekly.current_cycle(conn, old["id"], now)
+            if old_cycle:
+                weekly.close_cycle(conn, old_cycle, now, "手动切换阶段，封存本周")
         old_day = lifecycle.logical_date(now, int(old["cutoff_hour"]) if old else 4).isoformat()
         conn.execute(
             "UPDATE time_grants SET deleted_at=?,deleted_by=?,delete_reason='阶段切换，旧基础额度作废' "
@@ -1166,7 +1376,7 @@ def create_app() -> FastAPI:
             ).fetchone()
             if row is None:
                 raise ValueError("这笔申请已经处理")
-            day = lifecycle.logical_date(now, int(row["cutoff_hour"])).isoformat()
+            day = lifecycle.logical_date(now, int(stage["cutoff_hour"] if stage else row["cutoff_hour"])).isoformat()
             if (not stage or stage["id"] != row["stage_id"] or not row["active"]
                     or not row["exchange_enabled"] or day != row["logical_date"]):
                 raise ValueError("申请所属阶段或逻辑日已经结束")

@@ -1,0 +1,23 @@
+{% if week %}
+<section class="week-board pixel-card" aria-label="本周规则进度">
+  <div class="week-heading"><div><span class="eyebrow">WEEKLY QUEST</span><h2>本周规则进度</h2>
+    {% if week.cycle %}<p>{{ week.cycle.start_date }} — {{ week.cycle.end_date }} · 每日 {{ week.cycle.cutoff_hour }}:00 换日</p>{% endif %}</div>
+    {% if week.cycle %}<span class="status-badge">{{ '本周已结算' if week.cycle.status == 'completed' else '进行中' }}</span>{% endif %}
+  </div>
+  {% if week.cycle %}
+  <div class="week-score"><strong>{{ week.points }}</strong><span>本周积分{% if week.next and week.next.condition_type != 'none' %} · 下一目标 {{ week.next.points_threshold }} 分{% endif %}</span></div>
+  <ol class="rule-timeline">
+    {% for rule in week.rules %}
+    <li class="rule-stop {{ rule.execution.status }} {{ 'is-today' if rule.today }}">
+      <div class="rule-day">周{{ '一二三四五六日'[rule.weekday] }}{% if rule.today %}<small>今天</small>{% endif %}</div>
+      <strong>{{ rule.reward_minutes | duration }}</strong>
+      <p>{% if rule.condition_type == 'none' %}当天自动获得{% else %}{{ '本周累计' if rule.condition_type == 'week_total' else '当天累计' }} {{ rule.points_threshold }} 分{% endif %}</p>
+      <span class="rule-result">{% if rule.execution.status == 'unlocked' %}✓ 已解锁{% elif rule.execution.status == 'skipped' %}未发放{% elif not rule.today %}等待对应日期{% elif rule.remaining %}还差 {{ rule.remaining }} 分{% else %}等待系统处理{% endif %}</span>
+      {% if rule.ends_cycle %}<small>解锁后结束本周</small>{% endif %}
+    </li>{% else %}<li class="empty-state">本周未设置奖励，可由管理者配置下一周规则。</li>{% endfor %}
+  </ol>
+  {% if week.cycle.status == 'completed' %}<div class="week-footer">本周已封存，今日已解锁时长仍可使用。{% if week.auto_renew %}下一周期 {{ week.next_date }} 起按模板生效日期开启。{% else %}自动续周已关闭。{% endif %}</div>
+  {% else %}<div class="week-footer">仅当天有效 · 达标不扣积分 · 已解锁不回收 <a href="/history">历史周期 →</a></div>{% endif %}
+  {% else %}<p>{{ week.message }}</p>{% endif %}
+</section>
+{% endif %}

@@ -29,10 +29,10 @@
 {% set role = request.session.get('role') %}{% set alerts = pending_counts() if role == 'supervisor' else {'total': 0} %}
 <nav class="bottom-nav" aria-label="主导航">
   <a href="/" class="{{ 'active' if request.url.path == '/' }}"><span>⌂</span>首页</a>
-  <a href="/activity" class="{{ 'active' if request.url.path == '/activity' }}"><span>◈</span>动态</a>
   {% if role == 'checkin' %}<a href="/checkin" class="{{ 'active' if request.url.path == '/checkin' }}"><span>＋</span>打卡</a>
   {% else %}<a href="/admin" class="nav-with-badge {{ 'active' if request.url.path.startswith('/admin') }}"><span>⚙</span>管理{% if alerts.total %}<b>{{ alerts.total }}</b>{% endif %}</a>{% endif %}
   <a href="/computer" class="{{ 'active' if request.url.path == '/computer' }}"><span>▣</span>电脑</a>
+  <a href="/activity" class="{{ 'active' if request.url.path == '/activity' }}"><span>◈</span>动态</a>
 </nav>
 {% endif %}
 <script>

@@ -2,6 +2,8 @@
 {% block title %}电脑状态 · 家务勇者村{% endblock %}
 {% block content %}
 {% if role == 'supervisor' %}<a class="admin-back" href="/admin">← 管理中心</a>{% endif %}<span class="eyebrow">PLAY TIME</span><h1>电脑时间</h1>
+{% set week = weekly_status() %}
+{% if week and tab != 'manage' and tab != 'audit' %}{% include '_week_progress.html' %}{% endif %}
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}{% if message %}<div class="notice">{{ message }}</div>{% endif %}
 {% if role == 'supervisor' %}<nav class="filter-tabs computer-tabs"><a class="{{ 'active' if tab=='overview' }}" href="/computer">状态与记录</a><a class="{{ 'active' if tab=='manage' }}" href="/computer?tab=manage">记录管理</a><a class="{{ 'active' if tab=='audit' }}" href="/computer?tab=audit">更正审计</a></nav>{% endif %}
 {% if tab == 'overview' or role == 'checkin' %}

@@ -10,19 +10,28 @@
 <section class="attention-banner"><div><span class="attention-pulse"></span><b>有 {{ pending.total }} 项等待处理</b><p>打卡 {{ pending.checkin }} · 任务 {{ pending.mission }} · 时长兑换 {{ pending.time_exchange }}</p></div><a class="btn" href="/admin/reviews">立即审核 →</a></section>
 {% endif %}
 {% if not stage %}<div class="notice warning">当前没有生效阶段。积分仍会记录，但不会自动发放电脑额度。{% if role == 'supervisor' %}<a href="/admin/stages">配置阶段 →</a>{% endif %}</div>{% endif %}
+{% include '_week_progress.html' %}
 <section class="stat-grid">
   <a href="/points" class="pixel-card score-card status-link-card">
-    <div class="card-title"><span>◇</span> 积分能量</div>
+    <div class="card-title"><span>◇</span> {{ '历史总余额' if week else '积分能量' }}</div>
+    {% if week %}
+    <div class="score-line"><b>{{ points.balance }}</b><span>分</span></div>
+    <p class="muted">本周目标单独累计；额外兑换只扣余额，不影响周目标。</p>
+    <div class="mini-stats"><span>可兑换 <b>{{ points.spendable }}</b></span></div>
+    {% else %}
     <div class="score-line"><b>{{ points.balance }}</b><span>/ {{ points.goal or goal }}</span></div>
     <div class="pixel-bar"><i style="width:{{ points.progress if stage else progress }}%"></i></div>
     <div class="mini-stats"><span>可兑换 <b>{{ points.spendable }}</b></span><span>待结算 <b>{{ points.locked }}</b></span></div>
+    {% endif %}
     <small class="card-route">查看完整积分账本 →</small>
   </a>
   <article id="computer-live" data-used="{{ computer.used }}" data-allowance="{{ computer.allowance }}" data-running="{{ 1 if computer.open_session else 0 }}" class="pixel-card computer-card {{ 'danger-card' if computer.overrun else '' }}">
     <div class="card-title"><span>▣</span> 今日电脑</div>
     <div class="computer-status"><span class="status-dot {{ 'online' if computer.open_session else '' }}"></span>{{ '使用中' if computer.open_session else '未开机' }}</div>
     <div class="time-line"><b id="computer-primary">{{ computer.remaining if not computer.overrun else computer.overrun }}</b><span id="computer-label">分钟{{ '超时' if computer.overrun else '剩余' }}</span></div>
-    <p class="muted">额度 {{ computer.allowance }} · 已用 <span id="computer-used">{{ computer.used }}</span> · {{ comp_seg }} 段记录</p>
+    <div class="today-computer-metrics" aria-label="今日电脑时长"><span><b>{{ computer.allowance }}</b><small>今日获得</small></span><span><b id="computer-used">{{ computer.used }}</b><small>今日已用</small></span><span><b>{{ computer.remaining }}</b><small>今日剩余</small></span></div>
+    <p class="muted">{{ comp_seg }} 段使用记录{% if computer.overrun %} · 已超时 {{ computer.overrun }} 分钟{% endif %}</p>
+    {% if week %}<div class="grant-sources"><b>今日获得 {{ computer.allowance | duration }}</b>{% for grant in computer.grants %}<small>{{ grant.description }} · {{ grant.minutes }} 分钟</small>{% else %}<small>今天尚无额度。查看本周规则，完成目标后自动解锁。</small>{% endfor %}</div>{% endif %}
     {% if role == 'checkin' %}<div class="button-row home-computer-actions"><form method="post" action="/computer/on"><input type="hidden" name="return_to" value="/"><button class="btn green" {{ 'disabled' if computer.open_session }}>▶ 开机</button></form><form method="post" action="/computer/off"><input type="hidden" name="return_to" value="/"><button class="btn red" {{ 'disabled' if not computer.open_session }}>■ 关机</button></form></div>{% endif %}
     <a class="card-route" href="/computer">查看记录、额度与兑换 →</a>
   </article>

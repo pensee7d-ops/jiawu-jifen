@@ -1,5 +1,7 @@
 import datetime as dt
 
+from chores import weekly
+
 
 def parse_dt(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value)
@@ -10,12 +12,16 @@ def logical_date(now: dt.datetime, cutoff_hour: int = 4) -> dt.date:
 
 
 def active_stage(conn, now: dt.datetime):
-    day = logical_date(now)
-    return conn.execute(
-        "SELECT * FROM stages WHERE active=1 AND starts_on<=? AND ends_on>=? "
-        "ORDER BY id DESC LIMIT 1",
-        (day.isoformat(), day.isoformat()),
-    ).fetchone()
+    for row in conn.execute("SELECT * FROM stages WHERE active=1 ORDER BY id DESC"):
+        stage = dict(row)
+        cycle = weekly.current_cycle(conn, stage["id"], now)
+        if cycle:
+            stage["cutoff_hour"] = cycle["cutoff_hour"]
+            return stage
+        day = logical_date(now, int(stage["cutoff_hour"])).isoformat()
+        if stage["starts_on"] <= day <= stage["ends_on"]:
+            return stage
+    return None
 
 
 def window_bounds(stage, now: dt.datetime):
@@ -163,13 +169,18 @@ def _reconcile_open_reward(conn, window, stage, now: dt.datetime):
 def ensure_state(conn, now: dt.datetime):
     """补结算、创建当前窗口/基础时长，并在达标时即时发放奖励。"""
     _settle_expired(conn, now)
+    weekly.settle_expired(conn, now)
     for candidate in conn.execute("SELECT * FROM stages WHERE active=1").fetchall():
         day = logical_date(now, int(candidate["cutoff_hour"])).isoformat()
-        if day < candidate["starts_on"] or day > candidate["ends_on"]:
+        if day > candidate["ends_on"] and not weekly.current_cycle(conn, candidate["id"], now):
             conn.execute("UPDATE stages SET active=0 WHERE id=?", (candidate["id"],))
     stage = active_stage(conn, now)
     window = None
     if stage:
+        if weekly.is_template(conn, stage["id"]):
+            weekly.ensure_cycle(conn, stage, now)
+            conn.commit()
+            return stage, None
         bounds = window_bounds(stage, now)
         if bounds:
             start, end = bounds

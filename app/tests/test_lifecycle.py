@@ -1,6 +1,6 @@
 import datetime as dt
 
-from chores import db, lifecycle
+from chores import db, lifecycle, weekly
 
 
 def _conn(tmp_path):
@@ -91,3 +91,75 @@ def test_expired_stage_deactivates_without_fallback(tmp_path):
     stage, window = lifecycle.ensure_state(conn, dt.datetime(2026, 7, 1, 10))
     assert stage is None and window is None
     assert conn.execute("SELECT active FROM stages").fetchone()[0] == 0
+
+
+def _weekly_stage(conn):
+    conn.execute(
+        "INSERT INTO stages (name,starts_on,ends_on,mode,cutoff_hour,"
+        "window_start_weekday,window_end_weekday,points_goal,basic_minutes,"
+        "reward_minutes,active,created_at,created_by) "
+        "VALUES ('周末计划','2026-01-01','2026-12-31','rules',4,4,0,0,0,0,1,?,?)",
+        ("2026-01-01T00:00:00", "惠姐"),
+    )
+    stage_id = conn.execute("SELECT id FROM stages ORDER BY id DESC").fetchone()["id"]
+    weekly.install_template(conn, stage_id, dt.datetime(2026, 7, 1, 10))
+    conn.commit()
+    return stage_id
+
+
+def _grant_minutes(conn, date):
+    return conn.execute(
+        "SELECT COALESCE(SUM(minutes),0) AS n FROM time_grants "
+        "WHERE logical_date=? AND source_type='daily_rule_reward' AND deleted_at IS NULL",
+        (date,),
+    ).fetchone()["n"]
+
+
+def test_friday_rule_unlocks_150_minutes_once(tmp_path):
+    conn = _conn(tmp_path)
+    _weekly_stage(conn)
+    lifecycle.ensure_state(conn, dt.datetime(2026, 7, 3, 9))
+    lifecycle.ensure_state(conn, dt.datetime(2026, 7, 3, 10))
+    assert _grant_minutes(conn, "2026-07-03") == 150
+    assert conn.execute("SELECT COUNT(*) AS n FROM rule_executions WHERE status='unlocked'").fetchone()["n"] == 1
+
+
+def test_saturday_week_total_unlocks_immediately_and_is_idempotent(tmp_path):
+    conn = _conn(tmp_path)
+    _weekly_stage(conn)
+    now = dt.datetime(2026, 7, 4, 9)
+    lifecycle.ensure_state(conn, now)
+    assert _grant_minutes(conn, "2026-07-04") == 0
+    lifecycle.add_points(conn, 40, "earn", "周末任务", "test", "sat-40", "浩哥", now.isoformat())
+    conn.commit()
+    lifecycle.ensure_state(conn, now)
+    lifecycle.ensure_state(conn, now)
+    assert _grant_minutes(conn, "2026-07-04") == 210
+
+
+def test_sunday_unlock_closes_cycle_and_later_deduction_does_not_revoke(tmp_path):
+    conn = _conn(tmp_path)
+    _weekly_stage(conn)
+    now = dt.datetime(2026, 7, 5, 11)
+    lifecycle.add_points(conn, 70, "earn", "周末任务", "test", "sun-70", "浩哥", now.isoformat())
+    conn.commit()
+    lifecycle.ensure_state(conn, now)
+    cycle = conn.execute("SELECT * FROM weekly_cycles ORDER BY id DESC LIMIT 1").fetchone()
+    assert _grant_minutes(conn, "2026-07-05") == 150
+    assert cycle["status"] == "completed" and cycle["points_at_close"] == 70
+    lifecycle.add_points(conn, -50, "adjustment", "扣分", "test", "after-close", "惠姐", now.isoformat())
+    conn.commit()
+    lifecycle.ensure_state(conn, now)
+    assert _grant_minutes(conn, "2026-07-05") == 150
+    assert conn.execute("SELECT points_at_close FROM weekly_cycles WHERE id=?", (cycle["id"],)).fetchone()[0] == 70
+
+
+def test_sunday_miss_closes_at_monday_cutoff_and_next_cycle_opens(tmp_path):
+    conn = _conn(tmp_path)
+    _weekly_stage(conn)
+    lifecycle.ensure_state(conn, dt.datetime(2026, 7, 5, 12))
+    assert _grant_minutes(conn, "2026-07-05") == 0
+    lifecycle.ensure_state(conn, dt.datetime(2026, 7, 6, 4, 1))
+    cycles = conn.execute("SELECT * FROM weekly_cycles ORDER BY start_at").fetchall()
+    assert len(cycles) == 2
+    assert cycles[0]["status"] == "completed" and cycles[1]["status"] == "open"

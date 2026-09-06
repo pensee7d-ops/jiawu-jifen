@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}周期历史 · 家务勇者村{% endblock %}
+{% block content %}
+<a class="admin-back" href="/history">← 历史周期</a><span class="eyebrow">CYCLE ARCHIVE</span><h1>{{ week.cycle.name or '周规则周期' }}</h1>
+{% include '_week_progress.html' %}
+<section class="pixel-card"><h2>本周动态</h2><a class="btn" href="/activity?cycle_id={{ week.cycle.id }}">查看 {{ week.cycle.start_date }} — {{ week.cycle.end_date }} 的动态</a></section>
+{% endblock %}

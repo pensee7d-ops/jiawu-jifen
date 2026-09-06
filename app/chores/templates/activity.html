@@ -3,6 +3,8 @@
 {% block content %}
 <section class="page-intro"><span class="eyebrow">ADVENTURE LOG</span><h1>冒险动态</h1><p>任务和日常打卡各自记账，在这里汇成一条清楚的时间线。</p></section>
 {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+{% if cycles %}<form method="get" class="pixel-card inline-form"><label>按周期查看<select name="cycle_id"><option value="">按日查看</option>{% for cycle in cycles %}<option value="{{ cycle.id }}" {{ 'selected' if selected_cycle and selected_cycle.id == cycle.id }}>{{ cycle.name }} · {{ cycle.start_date }} — {{ cycle.end_date }}</option>{% endfor %}</select></label><input type="hidden" name="kind" value="{{ kind }}"><button class="btn small">查看周期</button></form>{% endif %}
+{% if selected_cycle %}<div class="notice">正在查看整周：{{ selected_cycle.start_date }} — {{ selected_cycle.end_date }}。日期导航可返回按日查看。</div>{% endif %}
 <section id="missions" class="active-quests">
   <div class="section-head"><div><span class="eyebrow">ACTIVE QUESTS</span><h2>当前任务</h2></div>{% if role == 'supervisor' %}<a href="/admin/missions">发布与管理 →</a>{% endif %}</div>
   {% for m in missions %}<article id="mission-{{ m['id'] }}" class="pixel-card quest-card status-{{ m['status'] }}">
@@ -23,12 +25,12 @@
 </section>
 <section class="timeline-section">
   <div class="section-head feed-heading"><div><span class="eyebrow">DAILY TIMELINE</span><h2>当日记录</h2><small>逻辑日 {{ feed_date }} · 凌晨切换</small></div><a href="/history">旧周期历史</a></div>
-  <nav class="filter-tabs" aria-label="动态类型"><a class="{{ 'active' if kind=='all' }}" href="/activity?feed_date={{ feed_date }}&kind=all">全部</a><a class="{{ 'active' if kind=='checkin' }}" href="/activity?feed_date={{ feed_date }}&kind=checkin">日常打卡</a><a class="{{ 'active' if kind=='mission' }}" href="/activity?feed_date={{ feed_date }}&kind=mission">短期任务</a></nav>
-  <form method="get" action="/activity" class="date-nav pixel-card"><input type="hidden" name="kind" value="{{ kind }}">
-    {% if feed_prev %}<a class="btn ghost small" href="/activity?feed_date={{ feed_prev }}&kind={{ kind }}">← 前一天</a>{% else %}<span class="btn ghost small disabled">← 前一天</span>{% endif %}
+  <nav class="filter-tabs" aria-label="动态类型"><a class="{{ 'active' if kind=='all' }}" href="/activity?feed_date={{ feed_date }}&kind=all{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">全部</a><a class="{{ 'active' if kind=='checkin' }}" href="/activity?feed_date={{ feed_date }}&kind=checkin{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">日常打卡</a><a class="{{ 'active' if kind=='mission' }}" href="/activity?feed_date={{ feed_date }}&kind=mission{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">短期任务</a></nav>
+  <form method="get" action="/activity" class="date-nav pixel-card"><input type="hidden" name="kind" value="{{ kind }}">{% if selected_cycle %}<input type="hidden" name="cycle_id" value="{{ selected_cycle.id }}">{% endif %}
+    {% if feed_prev %}<a class="btn ghost small" href="/activity?feed_date={{ feed_prev }}&kind={{ kind }}{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">← 前一天</a>{% else %}<span class="btn ghost small disabled">← 前一天</span>{% endif %}
     <label><span class="sr-only">选择动态日期</span><input type="date" name="feed_date" value="{{ feed_date }}" min="{{ feed_min }}" max="{{ feed_max }}" onchange="this.form.submit()"></label>
-    {% if feed_next %}<a class="btn ghost small" href="/activity?feed_date={{ feed_next }}&kind={{ kind }}">后一天 →</a>{% else %}<span class="btn ghost small disabled">后一天 →</span>{% endif %}
-    {% if feed_date != feed_today %}<a class="text-link today-link" href="/activity?feed_date={{ feed_today }}&kind={{ kind }}">回到今天</a>{% endif %}
+    {% if feed_next %}<a class="btn ghost small" href="/activity?feed_date={{ feed_next }}&kind={{ kind }}{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">后一天 →</a>{% else %}<span class="btn ghost small disabled">后一天 →</span>{% endif %}
+    {% if feed_date != feed_today %}<a class="text-link today-link" href="/activity?feed_date={{ feed_today }}&kind={{ kind }}{% if selected_cycle %}&cycle_id={{ selected_cycle.id }}{% endif %}">回到今天</a>{% endif %}
   </form>
   <div class="activity-timeline">
   {% for item in items %}

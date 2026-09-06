@@ -18,6 +18,7 @@ def test_init_schema_creates_tables(tmp_path):
     assert {
         "supervisors", "task_catalog", "checkins", "computer_sessions",
         "comments", "reactions", "announcements", "settings", "periods",
+        "weekly_cycles", "daily_rules", "rule_executions", "rule_templates", "cycle_events",
     } <= names
 
 

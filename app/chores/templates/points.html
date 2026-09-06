@@ -2,8 +2,10 @@
 {% block title %}积分账本 · 家务勇者村{% endblock %}
 {% block content %}
 <span class="eyebrow">POINT LEDGER</span><h1>积分账本</h1>
+{% set week = weekly_status() %}
+{% if week %}<div class="notice"><b>本周积分 {{ week.points }} 分</b><p>本周目标与历史总余额分开计算。达标不扣积分；额外兑换扣余额，不减少本周进度。已封存周期保持当时结算结果。</p></div>{% endif %}
 <section class="stat-grid three">
-  <div class="pixel-card kpi-box"><small>可用余额</small><b>{{ summary.balance }}</b></div>
+  <div class="pixel-card kpi-box"><small>历史总余额</small><b>{{ summary.balance }}</b></div>
   <div class="pixel-card kpi-box good"><small>累计赚取</small><b>+{{ summary.earned }}</b></div>
   <div class="pixel-card kpi-box bad"><small>累计扣减</small><b>-{{ summary.deducted }}</b></div>
 </section>
@@ -11,7 +13,7 @@
   <a class="{{ 'active' if not kind }}" href="/points">全部</a>
   <a class="{{ 'active' if kind=='earn' }}" href="/points?kind=earn">赚取</a>
   <a class="{{ 'active' if kind=='adjustment' }}" href="/points?kind=adjustment">调整</a>
-  <a class="{{ 'active' if kind=='settlement' }}" href="/points?kind=settlement">兑换</a>
+  <a class="{{ 'active' if kind in ['settlement','exchange'] }}" href="/points?kind=exchange">兑换</a>
 </div>
 <div class="ledger-list">{% for row in rows %}
   <article class="ledger-row">

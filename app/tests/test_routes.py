@@ -1,4 +1,5 @@
 import io
+from urllib.parse import unquote
 import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
@@ -383,6 +384,135 @@ def test_photo_picker_allows_album_and_rejects_bad_image(client):
     )
     assert result.status_code == 400
     assert "格式不支持" in result.text
+
+
+def _create_weekly_template(client, name="周末奖励模板"):
+    import datetime as dt
+    from chores.main import _now
+
+    today = _now().date()
+    response = client.post("/admin/weekly-templates", data={
+        "name": name,
+        "starts_on": today.isoformat(),
+        "ends_on": (today + dt.timedelta(days=30)).isoformat(),
+        "cutoff_hour": "4",
+        "auto_renew": "1",
+    })
+    assert response.status_code == 303
+    stage = client.app.state.conn.execute(
+        "SELECT * FROM stages WHERE name=? ORDER BY id DESC LIMIT 1", (name,)
+    ).fetchone()
+    assert stage is not None
+    return stage
+
+
+def test_weekly_template_creates_default_daily_rules(client):
+    _sup(client)
+    stage = _create_weekly_template(client)
+    conn = client.app.state.conn
+    template = conn.execute(
+        "SELECT * FROM rule_templates WHERE stage_id=?", (stage["id"],)
+    ).fetchone()
+    rules = conn.execute(
+        "SELECT * FROM daily_rules WHERE stage_id=? ORDER BY weekday", (stage["id"],)
+    ).fetchall()
+    assert template["auto_renew"] == 1
+    assert [(r["weekday"], r["condition_type"], r["points_threshold"],
+             r["reward_minutes"], r["ends_cycle"]) for r in rules] == [
+        (4, "none", 0, 150, 0),
+        (5, "week_total", 40, 210, 0),
+        (6, "week_total", 70, 150, 1),
+    ]
+
+
+def test_supervisor_can_copy_disable_and_enable_daily_rule(client):
+    _sup(client)
+    stage = _create_weekly_template(client)
+    conn = client.app.state.conn
+    friday = conn.execute(
+        "SELECT * FROM daily_rules WHERE stage_id=? AND weekday=4", (stage["id"],)
+    ).fetchone()
+
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "rule_id": friday["id"], "op": "disable",
+    })
+    assert response.status_code == 303
+    assert conn.execute("SELECT active FROM daily_rules WHERE id=?", (friday["id"],)).fetchone()[0] == 0
+
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "rule_id": friday["id"], "op": "copy",
+    })
+    assert response.status_code == 303
+    copied = conn.execute(
+        "SELECT * FROM daily_rules WHERE stage_id=? ORDER BY id DESC LIMIT 1", (stage["id"],)
+    ).fetchone()
+    assert copied["id"] != friday["id"] and copied["active"] == 0
+
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "rule_id": copied["id"], "op": "enable",
+    })
+    assert response.status_code == 303
+    assert conn.execute("SELECT active FROM daily_rules WHERE id=?", (copied["id"],)).fetchone()[0] == 1
+
+
+def test_daily_rule_configuration_rejects_conflicts_and_invalid_values(client):
+    _sup(client)
+    stage = _create_weekly_template(client)
+
+    duplicate = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "op": "add", "weekday": "5",
+        "condition_type": "week_total", "points_threshold": "50",
+        "reward_minutes": "30",
+    })
+    assert duplicate.status_code == 303
+    assert "同一天只能配置一条启用的规则" in unquote(duplicate.headers["location"])
+
+    negative_minutes = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "op": "add", "weekday": "2",
+        "condition_type": "none", "points_threshold": "0",
+        "reward_minutes": "-1",
+    })
+    assert negative_minutes.status_code == 303
+    assert "星期、积分或分钟不合法" in unquote(negative_minutes.headers["location"])
+
+    non_sunday_end = client.post("/admin/daily-rules", data={
+        "stage_id": stage["id"], "op": "add", "weekday": "2",
+        "condition_type": "none", "points_threshold": "0",
+        "reward_minutes": "30", "ends_cycle": "1",
+    })
+    assert non_sunday_end.status_code == 303
+    assert "结束周期规则必须在周日" in unquote(non_sunday_end.headers["location"])
+
+
+def test_checkin_user_cannot_edit_weekly_rules(client):
+    _login_checkin(client)
+    response = client.post("/admin/daily-rules", data={
+        "stage_id": "1", "op": "add", "weekday": "1",
+        "condition_type": "none", "points_threshold": "0", "reward_minutes": "30",
+    })
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_home_and_activity_show_weekly_rule_progress(client):
+    _sup(client)
+    stage = _create_weekly_template(client, "首页进度模板")
+    client.post(f"/admin/stages/{stage['id']}/switch")
+    conn = client.app.state.conn
+    cycle = conn.execute(
+        "SELECT * FROM weekly_cycles WHERE stage_id=? ORDER BY id DESC LIMIT 1", (stage["id"],)
+    ).fetchone()
+    assert cycle is not None
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "本周规则进度" in home.text
+    assert "周六" in home.text and "3 小时 30 分" in home.text
+    assert "今日获得" in home.text and "今日已用" in home.text
+
+    activity = client.get(f"/activity?cycle_id={cycle['id']}")
+    assert activity.status_code == 200
+    assert f"cycle_id={cycle['id']}" in activity.text
 
 
 def test_stage_and_mission_flow_awards_points_once(client):

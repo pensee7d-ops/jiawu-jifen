@@ -101,6 +101,64 @@ CREATE TABLE IF NOT EXISTS stages (
     created_by TEXT NOT NULL,
     activated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS weekly_cycles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    cutoff_hour INTEGER NOT NULL DEFAULT 4,
+    rules_json TEXT NOT NULL DEFAULT '[]',
+    name TEXT NOT NULL DEFAULT '',
+    points_at_close INTEGER,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    UNIQUE(stage_id, start_date),
+    FOREIGN KEY(stage_id) REFERENCES stages(id)
+);
+CREATE TABLE IF NOT EXISTS rule_templates (
+    stage_id INTEGER PRIMARY KEY REFERENCES stages(id),
+    auto_renew INTEGER NOT NULL DEFAULT 1,
+    week_start INTEGER NOT NULL DEFAULT 0,
+    week_end INTEGER NOT NULL DEFAULT 6,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cycle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id INTEGER REFERENCES weekly_cycles(id),
+    occurred_at TEXT NOT NULL,
+    description TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS daily_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_id INTEGER NOT NULL,
+    weekday INTEGER NOT NULL,
+    condition_type TEXT NOT NULL DEFAULT 'none',
+    points_threshold INTEGER NOT NULL DEFAULT 0,
+    reward_minutes INTEGER NOT NULL DEFAULT 0,
+    immediate INTEGER NOT NULL DEFAULT 1,
+    ends_cycle INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(stage_id) REFERENCES stages(id)
+);
+CREATE TABLE IF NOT EXISTS rule_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id INTEGER NOT NULL,
+    rule_id INTEGER NOT NULL,
+    logical_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    unlocked_at TEXT,
+    reward_minutes INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    UNIQUE(cycle_id, rule_id, logical_date),
+    FOREIGN KEY(cycle_id) REFERENCES weekly_cycles(id),
+    FOREIGN KEY(rule_id) REFERENCES daily_rules(id)
+);
 CREATE TABLE IF NOT EXISTS settlement_windows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stage_id INTEGER NOT NULL,
@@ -317,6 +375,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     for name, sql_type in stage_additions.items():
         if stage_cols and name not in stage_cols:
             conn.execute(f"ALTER TABLE stages ADD COLUMN {name} {sql_type}")
+
 
     # 只迁移当前开放旧周期；归档周期仍可在旧历史页面查看，但不进入余额。
     have_periods = conn.execute(

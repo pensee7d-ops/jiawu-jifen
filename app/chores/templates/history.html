@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>历史周期</h1>
-{% for it in items %}
+{% for cycle in cycles %}<article class="pixel-card"><h2>{{ cycle.name }} · {{ cycle.start_date }} — {{ cycle.end_date }}</h2><p>{{ '已结算 · ' ~ cycle.points_at_close ~ ' 分' if cycle.status == 'completed' else '进行中' }}{% if cycle.completed_at %} · {{ cycle.completed_at.replace('T',' ') }}{% endif %}</p><a href="/cycles/{{ cycle.id }}">规则快照与结算日志 →</a> · <a href="/activity?cycle_id={{ cycle.id }}">本周动态 →</a></article>{% endfor %}
+{% if items %}{% for it in items %}
 <div class="card">
   <a href="/history/{{ it['id'] }}"><b>第 {{ it['seq'] }} 期</b></a>
   <div class="muted">{{ it['started'] }} ~ {{ it['ended'] }}</div>
   <div>累计 <b>{{ it['total'] }}</b> 分 · {{ it['n'] }} 条打卡</div>
 </div>
-{% else %}<p class="muted">还没有已归档的周期。</p>{% endfor %}
+{% endfor %}{% elif not cycles %}<p class="muted">还没有已归档的周期。</p>{% endif %}
 <p><a href="/">← 回看板</a></p>
 {% endblock %}
